@@ -15,6 +15,7 @@ documentation = "https://docs.rs/ltc681x"
 embedded-hal = "1.0.0"
 heapless = "0.8.0"
 fixed = "1.15.0"
+modular-bitfield = "0.11.2"
 
 [dev-dependencies]
 mockall = "0.11.0"

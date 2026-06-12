@@ -51,6 +51,7 @@ pub mod example;
 pub mod ltc6810;
 pub mod ltc6811;
 pub mod ltc6812;
+pub mod ltc2949;
 pub mod ltc6813;
 pub mod monitor;
 pub mod spi;
