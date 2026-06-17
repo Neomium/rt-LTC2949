@@ -264,9 +264,8 @@ pub const T_BOOT_US: u32 = 100_000;
 /// Returned by [`Ltc2949Client::wake_isospi`].
 pub const T_READY_US: u32 = 20;
 
-/// Worst-case memory-lock acknowledge time (datasheet tMLCK in MEASURE mode, 130 ms;
-/// 40 ms in STANDBY — the MEASURE value is returned as the safe upper bound).
-/// Returned by [`Ltc2949Client::request_memory_lock`].
+/// Worst-case memory-lock acknowledge time (datasheet tMLCK, MEASURE mode; 40 ms in
+/// STANDBY). Returned by [`Ltc2949Client::request_memory_lock`].
 pub const T_MLCK_US: u32 = 130_000;
 
 // ---------------------------------------------------------------------------
@@ -282,9 +281,8 @@ pub enum Page {
     Page1 = 1,
 }
 
-/// Page-0 register addresses (datasheet Tables 24, 26-28, 57-64). PAGE0 holds the
-/// measurement results, accumulators, status and the control/fast-mode registers. The
-/// `#[repr(u8)]` discriminant is the on-bus `RADDR` byte.
+/// Page-0 register addresses: results, accumulators, status and control/fast-mode
+/// registers (datasheet Tables 24, 26-28, 57-64). Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum Page0Reg {
@@ -332,10 +330,8 @@ pub enum Page0Reg {
     RegsCtrl = 0xFF,
 }
 
-/// Page-1 register addresses (datasheet Tables 69, 71, 76). PAGE1 holds thresholds and
-/// configuration — here the ADC config plus the NTC-linearisation and sense-resistor
-/// temperature-compensation coefficient blocks. The `#[repr(u8)]` discriminant is the
-/// on-bus `RADDR` byte.
+/// Page-1 register addresses: ADC config plus the NTC-linearisation and sense-resistor
+/// TC coefficient blocks (datasheet Tables 69, 71, 76). Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum Page1Reg {
@@ -362,9 +358,8 @@ pub enum Page1Reg {
     Rs2T0 = 0xEC,
 }
 
-/// A device register that resolves to a memory [`Page`] and an on-bus address byte.
-/// Implemented by [`Page0Reg`] and [`Page1Reg`] so the framing helpers can take a
-/// register and derive the page automatically rather than threading both by hand.
+/// A device register resolving to a memory [`Page`] and an on-bus address byte, so the
+/// framing helpers take a register and derive the page rather than threading both.
 trait Register: Copy {
     const PAGE: Page;
     fn addr(self) -> u8;
@@ -388,11 +383,8 @@ impl Register for Page1Reg {
 // Bit definitions
 // ---------------------------------------------------------------------------
 
-/// Operation Control register (PAGE0, 0xF0) — datasheet Table 24.
-///
-/// `clr`, `sshot`, `adjupd` and `rst` are set-only: the device clears them again once
-/// the requested action has been performed. Polling the register lets you observe
-/// completion (e.g. `read_opctrl().adjupd() == false`).
+/// Operation Control register (PAGE0, 0xF0) — datasheet Table 24. `clr`, `sshot`, `adjupd`
+/// and `rst` are set-only; the device clears them once done (poll to observe completion).
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
@@ -422,12 +414,8 @@ pub struct FaCtrl {
     __: B4,
 }
 
-/// ADC Configuration register (PAGE1, 0xDF) — datasheet Table 69.
-///
-/// `p1asv` / `p2asv` switch the corresponding power ADC into voltage mode.
-/// `ntc1` / `ntc2` ask the device to linearise the matching SLOT through its
-/// Steinhart–Hart coefficients. `ntcslot1` ties channel 2's shunt TC compensation
-/// to NTC1 (single-shunt configuration).
+/// ADC Configuration register (PAGE1, 0xDF) — datasheet Table 69. `p1asv`/`p2asv` set
+/// power ADCs to voltage mode; `ntc1`/`ntc2` linearise the SLOT; `ntcslot1` ties CH2 TC to NTC1.
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
@@ -445,10 +433,8 @@ pub struct AdcConf {
     __: B1,
 }
 
-/// Register Control register (common to both pages, 0xFF) — datasheet Table 23.
-///
-/// `mlk` is the 2-bit memory-lock handshake (`0b01` request, `0b10` acknowledged
-/// from the device).
+/// Register Control register (common to both pages, 0xFF) — datasheet Table 23. `mlk` is
+/// the 2-bit memory-lock handshake (`0b01` request, `0b10` device-acknowledged).
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
@@ -498,13 +484,8 @@ pub struct FifoSample {
     pub tag: FifoTag,
 }
 
-/// Coherent snapshot of one channel's charge / energy / time-base accumulators.
-///
-/// On the device these three sit in a single 16-byte register row (channel 1 at
-/// `0x00–0x0F`, channel 2 at `0x10–0x1F`). The datasheet guarantees coherency for a
-/// multi-byte burst *within a row*, so reading all three in one burst yields a consistent
-/// snapshot **without** the 130 ms memory lock — the values share the same `CONT` cycle.
-/// Reading charge and time separately would otherwise skew by up to one 100 ms cycle.
+/// Coherent snapshot of one channel's charge / energy / time-base accumulators. All three
+/// share a 16-byte row, so one burst reads them from the same `CONT` cycle (no lock needed).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Accumulators {
     /// Charge (48-bit two's-complement; units LSB·377.887 ps·V).
@@ -519,33 +500,16 @@ pub struct Accumulators {
 // NTC linearisation
 // ---------------------------------------------------------------------------
 
-/// One of the two LTC2949 measurement channels. Each channel pairs:
-///
-/// * a current/power ADC reading a single shunt (`I1`/`P1` vs. `I2`/`P2`),
-/// * a SLOT in the auxiliary multiplexer (`SLOT1` / `SLOT2`),
-/// * an NTC lineariser with its own reference resistor and Steinhart-Hart
-///   coefficients (`RREF1`/`NTC1A-C` vs. `RREF2`/`NTC2A-C`),
-/// * a sense-resistor temperature-compensation entry (`RS1TC`/`RS1T0`/`RS1TC2`
-///   vs. `RS2*`).
+/// One of the two LTC2949 measurement channels — each pairs a current/power ADC, a SLOT,
+/// an NTC lineariser and a sense-resistor TC entry (suffix 1 vs. 2).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Channel {
     One,
     Two,
 }
 
-/// Steinhart–Hart linearisation parameters for a single NTC channel. All four
-/// values are stored on-chip in the device's custom 24-bit floating-point
-/// "Float24" format; the driver handles the `f32 → Float24` conversion.
-///
-/// The Steinhart–Hart relation programmed by these coefficients is
-///
-/// ```text
-/// 1 / T = A + B · ln(R_ntc) + C · (ln(R_ntc))³
-/// ```
-///
-/// where `R_ntc` is inferred from the divider `R_ref` and the ADC measurement of
-/// the NTC's pin voltage relative to `VREF` (datasheet "Temperature Measurement").
-/// Typical magnitudes: `a ≈ 1e-3`, `b ≈ 2e-4`, `c ≈ 1e-7`.
+/// Steinhart–Hart parameters for one NTC channel: `1/T = a + b·ln(R) + c·ln(R)³`, with `R`
+/// inferred from `r_ref`. Stored on-chip as Float24 (driver handles `f32 → Float24`).
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct NtcConfig {
     /// Series reference resistor `R_ref` in ohms.
@@ -558,15 +522,8 @@ pub struct NtcConfig {
     pub c: f32,
 }
 
-/// Encodes an `f32` in the LTC2949's 24-bit floating-point "Float24" format
-/// (datasheet Table 68): 1 sign bit, 7-bit exponent biased by 63, 16-bit mantissa
-/// with implicit leading 1. Returned bytes are MSB-first as the device expects.
-///
-/// Subnormals, infinities and NaNs are *not* representable; values outside the
-/// Float24 normal range are clamped to ±0 (underflow) or the largest
-/// representable magnitude (overflow) by truncating the exponent. The driver's
-/// supported use cases (resistor values, Steinhart–Hart coefficients) sit well
-/// inside the normal range so this clamping is academic.
+/// Encodes an `f32` as MSB-first Float24 (datasheet Table 68): 1 sign, 7-bit exponent
+/// biased 63, 16-bit mantissa. Out-of-range values clamp to ±0 or the largest magnitude.
 pub(crate) fn float24_encode(value: f32) -> [u8; 3] {
     let bits = value.to_bits();
     let sign = (bits >> 31) & 1;
@@ -601,9 +558,8 @@ pub(crate) fn float24_encode(value: f32) -> [u8; 3] {
     ]
 }
 
-/// Variant of [`float24_encode`] that returns only the top two bytes, used for the
-/// `RSxT0` reference-temperature registers. Per datasheet Table 71, those registers
-/// occupy 16 bits and the device implicitly treats the missing mantissa LSB as 0.
+/// Like [`float24_encode`] but returns only the top two bytes, for the 16-bit `RSxT0`
+/// registers (datasheet Table 71; the device treats the missing mantissa LSB as 0).
 pub(crate) fn float24_encode_high2(value: f32) -> [u8; 2] {
     let [b0, b1, _] = float24_encode(value);
     [b0, b1]
@@ -613,29 +569,14 @@ pub(crate) fn float24_encode_high2(value: f32) -> [u8; 2] {
 // Sense-resistor temperature compensation
 // ---------------------------------------------------------------------------
 
-/// Programmable temperature-drift compensation for a sense resistor (datasheet
-/// "Sense Resistor Temperature Compensation").
-///
-/// The LTC2949 corrects the measured current/charge/energy of channel *n* with
-///
-/// ```text
-/// R_sense(T) = R0 · [1 + tc · (T - t_ref) + tc2 · (T - t_ref)²]
-/// ```
-///
-/// where `T` is the linearised NTC*n* reading. The compensation is enabled by
-/// the presence of non-zero `tc` / `tc2` values together with [`AdcConf::ntc1`]
-/// (or `ntc2`) being set so that SLOT*n* actually produces a temperature.
-///
-/// For copper shunts the typical first-order coefficient is `0.0039 /K`
-/// (3900 ppm/K) with `tc2 = 0.0`. Low-TC alloy shunts (manganin, Zeranin, etc.)
-/// can usually be left uncompensated.
+/// Sense-resistor temperature-drift compensation: `R(T) = R0·[1 + tc·(T-t_ref) + tc2·(T-t_ref)²]`,
+/// `T` being the linearised NTC reading. Copper ≈ `0.0039 /K`; low-TC alloys can stay uncompensated.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct ShuntTcConfig {
     /// First-order temperature coefficient (1/K). Datasheet `RSnTC`.
     pub tc: f32,
-    /// Reference temperature `T0` in °C — the temperature at which the sense
-    /// resistor equals its nominal value. Datasheet `RSnT0`. Stored on-chip in
-    /// the 16-bit truncated-mantissa variant of Float24.
+    /// Reference temperature `T0` in °C where the resistor is nominal (datasheet `RSnT0`,
+    /// stored as 16-bit truncated Float24).
     pub t_ref: f32,
     /// Second-order temperature coefficient (1/K²). Datasheet `RSnTC2`. Set to
     /// `0.0` to disable the quadratic term — fine for copper.
@@ -646,9 +587,8 @@ pub struct ShuntTcConfig {
 // Auxiliary multiplexer inputs (datasheet Table 57)
 // ---------------------------------------------------------------------------
 
-/// Inputs the AUX multiplexer can route to either of the SLOT pair (`MUXP` /
-/// `MUXN`) or to the fast-mode `FAMUX` registers. Variant discriminants match
-/// the 5-bit encoding listed in datasheet Table 57.
+/// Inputs the AUX multiplexer can route to the SLOT pair (`MUXP`/`MUXN`) or the fast-mode
+/// `FAMUX` registers. Discriminants match the 5-bit encoding in datasheet Table 57.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum MuxInput {
@@ -707,48 +647,21 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
 // Client
 // ---------------------------------------------------------------------------
 
-/// High-level LTC2949 operation set, the dependency-injection seam for hosts.
-///
-/// This mirrors [`LTC681XClient`](crate::monitor::LTC681XClient) for the cell monitors:
-/// application tasks depend on `impl Ltc2949Client` (or a mock) rather than the concrete
-/// [`LTC2949`] client, which keeps the bus type and topology out of the task signature.
-///
-/// The generic FIFO drains (`read_fifo_*`) are intentionally *not* part of this trait —
-/// being generic over the sample count they don't mock cleanly; use them on the concrete
-/// [`LTC2949`] when fast-continuous capture is required.
+/// High-level LTC2949 operation set, the dependency-injection seam for hosts (mirrors
+/// [`LTC681XClient`](crate::monitor::LTC681XClient)). FIFO drains stay on [`LTC2949`].
 pub trait Ltc2949Client {
     type Error;
 
-    /// Starts the recommended wake-up sequence (datasheet Figure 20): two dummy null
-    /// bytes provide the isoSPI wake-up edge. Returns the wait in microseconds
-    /// ([`T_BOOT_US`]) the host must observe before calling
-    /// [`confirm_wake_up`](Self::confirm_wake_up), covering the case where the core was in
-    /// SLEEP or had just powered up and is still booting to STANDBY. This also invalidates
-    /// the cached page selection, since a device reset clears it.
-    ///
-    /// The driver never blocks — the host owns the wait (poll a timer, sleep, etc.).
-    ///
-    /// Use this on bring-up and after any intentional SLEEP. For a device that is already
-    /// awake (core in STANDBY/MEASURE) whose isoSPI port has merely gone idle, the cheaper
-    /// [`wake_isospi`](Self::wake_isospi) is sufficient.
+    /// Starts wake-up (datasheet Figure 20): pulses the isoSPI edge and invalidates the page
+    /// cache. Returns the wait ([`T_BOOT_US`]) to observe before [`confirm_wake_up`](Self::confirm_wake_up).
     fn start_wake_up(&mut self) -> Result<u32, Self::Error>;
 
-    /// Completes the wake-up sequence by writing WKUPACK, confirming wake-up so the device
-    /// does not auto-return to SLEEP after `tACKN` (1 s). Call once the wait returned by
-    /// [`start_wake_up`](Self::start_wake_up) has elapsed.
+    /// Completes wake-up by writing WKUPACK so the device does not auto-sleep after `tACKN`
+    /// (1 s). Call once the [`start_wake_up`](Self::start_wake_up) wait has elapsed.
     fn confirm_wake_up(&mut self) -> Result<(), Self::Error>;
 
-    /// Re-wakes only the isoSPI port (datasheet `tIDLE` = 6.4 ms), leaving the core state
-    /// untouched. The port drops to IDLE after a few milliseconds of bus inactivity, so a
-    /// periodic task must pulse it before each burst or the first frame is lost during the
-    /// port start-up. One dummy byte gives the edge; the returned wait ([`T_READY_US`])
-    /// must elapse before the next transaction. In a cooperative task loop one scheduler
-    /// iteration typically exceeds it, so pulsing at the end of one cycle and transacting
-    /// on the next needs no timer at all.
-    ///
-    /// This does **not** boot the core or confirm wake-up — use
-    /// [`start_wake_up`](Self::start_wake_up) for that. Note the LTC68xx cell monitors on
-    /// the same bus share this requirement.
+    /// Re-wakes only the isoSPI port (idles after `tIDLE` = 6.4 ms), leaving the core alone.
+    /// Returns the wait ([`T_READY_US`]) before the next transaction. Cell monitors share this.
     fn wake_isospi(&mut self) -> Result<u32, Self::Error>;
 
     /// Writes the Operation Control register (PAGE0, 0xF0).
@@ -760,72 +673,37 @@ pub trait Ltc2949Client {
     /// Writes the Fast Control register (PAGE0, 0xF5).
     fn write_factrl(&mut self, value: FaCtrl) -> Result<(), Self::Error>;
 
-    /// Writes the ADC Configuration register (PAGE1, 0xDF).
-    ///
-    /// Per the datasheet, changes to configuration registers other than thresholds only
-    /// take effect after an ADJUPD pulse on OPCTRL while the core is in STANDBY.
+    /// Writes the ADC Configuration register (PAGE1, 0xDF). Takes effect only after an
+    /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
     fn write_adcconf(&mut self, value: AdcConf) -> Result<(), Self::Error>;
 
     /// Writes the Fast AUX mux selection (FAMUXP, FAMUXN).
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Self::Error>;
 
-    /// Writes the Steinhart–Hart coefficients and reference resistor for an NTC channel,
-    /// encoding each parameter in the device's Float24 format.
-    ///
-    /// To activate the linearisation after a successful write the caller still has to:
-    ///
-    /// 1. Configure the SLOT mux registers so the relevant `Vn` pin is presented to the
-    ///    AUX ADC together with `VREF`.
-    /// 2. Set [`AdcConf::ntc1`] (or `ntc2`) and apply it.
-    /// 3. Pulse [`OpCtrl::adjupd`] while the core is in STANDBY so the device latches the
-    ///    new configuration.
-    ///
-    /// `RREFn` is written as a single 3-byte burst at its dedicated address; the three
-    /// coefficient registers (`NTCnA/B/C`) are contiguous on the page so they go out in
-    /// one 9-byte burst.
+    /// Writes the Float24 Steinhart–Hart coefficients and reference resistor for an NTC
+    /// channel. Activate via [`write_slot_mux`](Self::write_slot_mux), [`AdcConf::ntc1`] and an ADJUPD pulse.
     fn write_ntc_coefficients(&mut self, channel: Channel, params: &NtcConfig) -> Result<(), Self::Error>;
 
-    /// Writes the sense-resistor temperature-compensation parameters for one channel.
-    /// `RSnTC` (3 bytes) and `RSnT0` (2 bytes) sit contiguously on page 1 so they're sent
-    /// in a single 5-byte burst; `RSnTC2` lives at a distinct address (3 bytes).
-    ///
-    /// As with [`write_ntc_coefficients`](Self::write_ntc_coefficients), the new values
-    /// only become active after an `ADJUPD` pulse on `OpCtrl` while the core is in STANDBY.
+    /// Writes the sense-resistor temperature-compensation parameters for one channel. Active
+    /// only after an `ADJUPD` pulse on `OpCtrl` while the core is in STANDBY.
     fn write_shunt_tc(&mut self, channel: Channel, config: &ShuntTcConfig) -> Result<(), Self::Error>;
 
-    /// Configures the slow-mode SLOT auxiliary multiplexer (datasheet Tables 57 & 58). The
-    /// `negative` and `positive` arguments select the inputs routed to `MUXN` and `MUXP`
-    /// for the chosen SLOT, which the AUX ADC then measures differentially each Round-Robin
-    /// cycle.
-    ///
-    /// Typical NTC wiring uses `(positive = Vx, negative = Agnd)` — a single-ended pin
-    /// reading — together with [`AdcConf::ntc1`]/`ntc2` set so the device reports the
-    /// result as a linearised temperature.
+    /// Routes `negative`/`positive` to the SLOT's `MUXN`/`MUXP` for differential AUX-ADC
+    /// reads (datasheet Tables 57 & 58). NTCs typically use `(Vx, Agnd)`.
     fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Self::Error>;
 
     /// Reads the STATUS register (raw byte, datasheet Table 26).
     fn read_status(&mut self) -> Result<u8, Self::Error>;
 
-    /// Reads the FAULTS register (raw byte, datasheet 0xDD). Bits flag conditions such as
-    /// UVLO, POR and self-test failures; consult the datasheet for the bit map. No typed
-    /// bitfield is provided yet.
+    /// Reads the FAULTS register (raw byte, datasheet 0xDD; UVLO/POR/self-test bits). No
+    /// typed bitfield yet — consult the datasheet for the bit map.
     fn read_faults(&mut self) -> Result<u8, Self::Error>;
 
     /// Reads the EXTFAULTS (extended faults) register (raw byte, datasheet 0xDC).
     fn read_extfaults(&mut self) -> Result<u8, Self::Error>;
 
-    /// Requests the memory lock (datasheet Figure 19): writes `MLK = 0b01` to REGSCTRL.
-    /// Returns the wait in microseconds ([`T_MLCK_US`], the worst-case `tMLCK,M`) the host
-    /// must observe before the register map is guaranteed frozen. While locked, reads of
-    /// any one page return a coherent snapshot even across registers; internal
-    /// accumulation continues unaffected. Release with
-    /// [`unlock_memory`](Self::unlock_memory) — the lock does not expire on its own.
-    ///
-    /// **Not normally required:** a single multi-byte burst within one 16-byte row
-    /// (every accumulator here — e.g. `Charge1`, `Energy1`, `Time1`) is already coherent
-    /// per the datasheet, so individual reads do not need locking. Use this only to snapshot
-    /// *several* registers at the same instant. Stay on the currently selected page while
-    /// locked — switching pages rewrites REGSCTRL and releases the lock.
+    /// Requests the memory lock (datasheet Figure 19, `MLK = 0b01`) for a cross-register
+    /// snapshot; returns the wait ([`T_MLCK_US`]). Stay on one page, then [`unlock_memory`](Self::unlock_memory).
     fn request_memory_lock(&mut self) -> Result<u32, Self::Error>;
 
     /// Releases the memory lock (`MLK = 0b00`), letting the register map update again.
@@ -892,38 +770,21 @@ pub trait Ltc2949Client {
     /// Reads time-base 4.
     fn read_time4(&mut self) -> Result<u32, Self::Error>;
 
-    /// Reads channel 1's charge, energy and time-base ([`Accumulators`]) in a single
-    /// 16-byte burst (row `0x00–0x0F`). The three values form a coherent snapshot from the
-    /// same `CONT` cycle without needing the memory lock — prefer this over separate
-    /// [`read_charge1`](Self::read_charge1) / [`read_time1`](Self::read_time1) calls when
-    /// charge and elapsed time must line up (e.g. state-of-charge integration).
+    /// Reads channel 1's charge, energy and time-base ([`Accumulators`]) in one coherent
+    /// 16-byte burst — prefer this for SoC integration over separate charge/time reads.
     fn read_accumulators1(&mut self) -> Result<Accumulators, Self::Error>;
 
     /// Reads channel 2's charge, energy and time-base in a single coherent 16-byte burst
     /// (row `0x10–0x1F`). See [`read_accumulators1`](Self::read_accumulators1).
     fn read_accumulators2(&mut self) -> Result<Accumulators, Self::Error>;
 
-    /// Sends a broadcast ADCV (0x0260) which triggers a fast single-shot conversion on
-    /// every device that recognises it — both the LTC2949 (per its FACTRL configuration)
-    /// and any LTC68xx cell monitors on the same isoSPI bus. Use this when synchronous
-    /// measurements with the cell monitors are required.
-    ///
-    /// **Cross-task hazard:** because this is a *broadcast*, it also (re)starts conversions
-    /// on the cell-monitor chain. If another task owns the cell-monitor conversion schedule
-    /// (as in a BMS where a separate task drives the LTC68xx ADC), calling this from the
-    /// meter task will restart an in-flight chain conversion and corrupt its timing. In that
-    /// design, run the LTC2949 in slow continuous mode (`OPCTRL.CONT`) and read results
-    /// without this broadcast, or route the single shared ADCV through the conversion task's
-    /// schedule.
+    /// Broadcast ADCV (0x0260): synchronous fast conversion on the LTC2949 and every cell
+    /// monitor. **Hazard:** also restarts the chain, so don't call it from a separate meter task.
     fn trigger_adcv_broadcast(&mut self) -> Result<(), Self::Error>;
 }
 
-/// LTC2949 client for the addressable, parallel-to-daisy-chain topology
-/// (datasheet Figure 12(B)). The device is reached directly via `DCMD`, so no
-/// chain-length parameter is required.
-///
-/// The high-level operations live on the [`Ltc2949Client`] trait (bring it into scope to
-/// call `read_current1()`, `start_wake_up()`, etc.); generic FIFO drains are inherent.
+/// LTC2949 client for the parallel-to-daisy-chain topology (datasheet Figure 12(B)),
+/// reached directly via `DCMD`. High-level ops are on the [`Ltc2949Client`] trait.
 pub struct LTC2949<B, P>
 where
     B: SpiDevice<u8>,
@@ -939,8 +800,8 @@ impl<B> LTC2949<B, NoPolling>
 where
     B: SpiDevice<u8>,
 {
-    /// Constructs an LTC2949 client. The LTC2949 is addressed directly via `DCMD`,
-    /// whether it sits alone on the bus or in parallel with a cell-monitor chain.
+    /// Constructs an LTC2949 client, addressed directly via `DCMD` (alone on the bus or in
+    /// parallel with a cell-monitor chain).
     pub fn new(bus: B) -> Self {
         Self {
             bus,
@@ -1213,21 +1074,15 @@ where
     }
 }
 
-/// Inherent helpers: constructor lives above; FIFO drains are generic over the sample
-/// count `N` (so they stay off the object-safe-ish [`Ltc2949Client`] trait), and the
-/// remaining methods are private framing/decoding internals.
+/// Inherent helpers: FIFO drains (generic over `N`, so off the trait) plus private
+/// framing/decoding internals.
 impl<B, P> LTC2949<B, P>
 where
     B: SpiDevice<u8>,
     P: PollMethod<B>,
 {
-    /// Drains up to `N` samples from the I1 FIFO. Reads stop at the first non-`Ok`
-    /// sample, which **is** included as the final element so the caller can inspect its
-    /// [`tag`](FifoSample::tag) — [`ReadOverrun`](FifoTag::ReadOverrun) means the FIFO held
-    /// no new data (its `raw` is stale), [`WriteOverrun`](FifoTag::WriteOverrun) means the
-    /// FIFO overflowed (its `raw` is valid). All preceding elements are valid `Ok` samples.
-    ///
-    /// Each FIFO sample is three bytes: MSB, LSB, TAG (datasheet Table 29).
+    /// Drains up to `N` I1 FIFO samples (3 bytes each: MSB, LSB, TAG). Stops at the first
+    /// non-`Ok` sample, which is included as the terminator so the caller can read its `tag`.
     pub fn read_fifo_i1<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
         self.read_fifo::<N>(Page0Reg::FifoI1)
     }
@@ -1294,9 +1149,8 @@ where
         Ok(sign_extend_48(&buf))
     }
 
-    /// Reads a full 16-byte accumulator row (charge, energy, time) in one coherent burst.
-    /// `reg` is the row's charge address (`0x00` for channel 1, `0x10` for channel 2); the
-    /// device auto-increments through energy (`+0x06`) and time (`+0x0C`).
+    /// Reads a full 16-byte accumulator row (charge, energy, time) in one coherent burst,
+    /// starting at the row's charge address (`0x00` for channel 1, `0x10` for channel 2).
     fn read_accumulator_row(&mut self, reg: Page0Reg) -> Result<Accumulators, Error<B>> {
         let mut buf = [0u8; 16];
         self.read_bytes(reg, &mut buf)?;
@@ -1315,11 +1169,8 @@ where
 
     // -- Page handling ----------------------------------------------------
 
-    /// REGSCTRL value reflecting the currently cached page with RDCVCONF=1, BCREN=0,
-    /// MLK=00. RDCVCONF stays 1 so an addressed RDCV reports fast-mode conversion results;
-    /// BCREN stays 0 (parallel topology) so the LTC2949 never responds to broadcast RDCV
-    /// and cannot collide with the cell monitors on the shared bus. Used by the memory-lock
-    /// helpers, which must rewrite REGSCTRL without changing the selected page.
+    /// REGSCTRL for the current page with RDCVCONF=1, BCREN=0, MLK=00. Lets the memory-lock
+    /// helpers rewrite REGSCTRL without changing the selected page.
     fn regsctrl_base(&self) -> RegsCtrl {
         let page1 = matches!(self.current_page.unwrap_or(Page::Page0), Page::Page1);
         RegsCtrl::new().with_rdcvconf(true).with_page(page1)
@@ -1339,10 +1190,8 @@ where
 
     // -- Read primitive ---------------------------------------------------
 
-    /// Reads `buf.len()` bytes starting at `reg` from the LTC2949 via a direct `DCMD`
-    /// read — the LTC2949 is addressed in parallel to the cell-monitor chain, so its
-    /// response returns with no shift-register prefix. The register's page is selected
-    /// first if not already current.
+    /// Reads `buf.len()` bytes from `reg` via a direct `DCMD` read (no shift-register
+    /// prefix in the parallel topology), selecting the page first if needed.
     fn read_bytes<R: Register>(&mut self, reg: R, buf: &mut [u8]) -> Result<(), Error<B>> {
         self.select_page(R::PAGE)?;
         self.dcmd_read(reg.addr(), buf)
@@ -1368,9 +1217,7 @@ where
     // (`PECC = N-1`, range 0..=15). The ID byte itself carries redundancy so it is not
     // covered by a PEC.
 
-    /// We use a fixed PECC of 15 (16 data bytes per PEC) for maximum throughput on
-    /// long bursts. Short reads/writes still work — fewer than 16 bytes simply emit a
-    /// single PEC at the end.
+    /// Fixed PECC of 15 (16 data bytes per PEC); shorter bursts just emit one PEC at the end.
     const PECC: u8 = 15;
     const N_PER_PEC: usize = 16;
 
@@ -1425,15 +1272,8 @@ where
 
     // -- DCMD direct read -------------------------------------------------
 
-    /// Reads `data.len()` bytes via a direct `DCMD` read. The slave's data appears on
-    /// MISO immediately after the master finishes clocking out the 5-byte command
-    /// header (`[0xFE, RADDR, PEC0, PEC1, ID]`), followed by the data PEC:
-    ///
-    /// `MISO: [.., .., .., .., .., D0..D(n-1), PEC0, PEC1]`
-    ///
-    /// Reads longer than one PEC group (16 bytes) are split into separate `DCMD`
-    /// transactions; the device auto-increments its address pointer so each chunk
-    /// re-issues the command at the advanced address.
+    /// Direct `DCMD` read: data appears on MISO after the 5-byte header, then the PEC.
+    /// Reads over one PEC group (16 bytes) split into chunks at auto-incremented addresses.
     fn dcmd_read(&mut self, addr: u8, buf: &mut [u8]) -> Result<(), Error<B>> {
         if buf.len() > Self::N_PER_PEC {
             for (i, chunk) in buf.chunks_mut(Self::N_PER_PEC).enumerate() {
