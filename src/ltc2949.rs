@@ -78,7 +78,7 @@
 //!
 //! // ---- Step 1 – stay in STANDBY (CONT=0) ------------------------------
 //! // The wake-up sequence leaves the core in STANDBY; if it was already in
-//! // MEASURE you'd need: client.write_opctrl(OpCtrl::new())?;
+//! // MEASURE you'd need: client.write_opctrl(OpCtrl::default())?;
 //! //
 //! // It is also recommended to check STATUS / FAULTS / EXTFAULTS here and
 //! // clear any UVLO/POR flags. The driver exposes read_status(); the FAULTS
@@ -109,7 +109,7 @@
 //!
 //! // ---- Step 3 – tell the AUX ADC to report SLOT1 as a temperature -----
 //! // NTC1 on, both power ADCs left in power-mode (P1ASV/P2ASV = 0).
-//! client.write_adcconf(AdcConf::new().with_ntc1(true))?;
+//! client.write_adcconf(AdcConf::default().with_ntc1(true))?;
 //!
 //! // ---- Step 4 – route the NTC's V-pin into SLOT1 ----------------------
 //! // Typical wiring: VREF -- R_ref -- V1 -- NTC -- AGND. We read the V1 pin
@@ -121,11 +121,11 @@
 //! // ---- Step 5 – commit page-1 configuration (ADJUPD) ------------------
 //! // OPCTRL.ADJUPD is a set-only bit; the device clears it after ≤100 ms.
 //! // Poll OPCTRL.adjupd() == false to know when the update has landed.
-//! client.write_opctrl(OpCtrl::new().with_adjupd(true))?;
+//! client.write_opctrl(OpCtrl::default().with_adjupd(true))?;
 //!
 //! // ---- Step 6 – enter continuous slow-mode measurement ----------------
 //! // ≈100 ms per cycle, 18-bit results. First update lands ~50 ms later.
-//! client.write_opctrl(OpCtrl::new().with_cont(true))?;
+//! client.write_opctrl(OpCtrl::default().with_cont(true))?;
 //!
 //! // ---- Slow-mode reads ------------------------------------------------
 //! // After ≥100 ms of CONT, the result registers are populated. LSB sizes
@@ -151,13 +151,13 @@
 //! // ---- Fast measurements synchronised with the cell monitors ----------
 //! // Configure channels 1 and 2 for fast single-shot, then broadcast ADCV
 //! // so the LTC2949 and every LTC6813 trigger at the same instant.
-//! client.write_factrl(FaCtrl::new().with_fach1(true).with_fach2(true))?;
+//! client.write_factrl(FaCtrl::default().with_fach1(true).with_fach2(true))?;
 //! client.trigger_adcv_broadcast()?;
 //! // ... wait the fast conversion time (~0.8 ms) ...
 //!
 //! // Fast continuous: set FACONV=1 and drain the FIFO periodically.
 //! client.write_factrl(
-//!     FaCtrl::new().with_faconv(true).with_fach1(true).with_fach2(true),
+//!     FaCtrl::default().with_faconv(true).with_fach1(true).with_fach2(true),
 //! )?;
 //! // ... wait ≥ 1.26 ms for the first sample, then read up to 32 at a time:
 //! let samples = client.read_fifo_i1::<32>()?;
@@ -210,8 +210,8 @@
 //! let boot_us = meter.start_wake_up().map_err(|_| ())?;
 //! // ... host waits `boot_us` microseconds ...
 //! meter.confirm_wake_up().map_err(|_| ())?;
-//! meter.write_opctrl(OpCtrl::new().with_cont(true)).map_err(|_| ())?; // CONT prereq
-//! meter.write_factrl(FaCtrl::new().with_fach2(true)).map_err(|_| ())?; // CH2 fast
+//! meter.write_opctrl(OpCtrl::default().with_cont(true)).map_err(|_| ())?; // CONT prereq
+//! meter.write_factrl(FaCtrl::default().with_fach2(true)).map_err(|_| ())?; // CH2 fast
 //!
 //! // ---- One broadcast ADCV → both devices convert at the same instant ----------
 //! // start_conv_cells emits a *broadcast* ADCV (A/B address bits = 0), so it reaches
@@ -449,6 +449,30 @@ pub struct RegsCtrl {
     #[skip]
     __: B1,
     pub rdcvconf: bool,
+}
+
+impl Default for OpCtrl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for FaCtrl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for AdcConf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for RegsCtrl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// FIFO sample tag values (datasheet Table 30).
@@ -868,11 +892,7 @@ where
         self.write_bytes(Page0Reg::FaMuxN, &[mux_n, mux_p])
     }
 
-    fn write_ntc_coefficients(
-        &mut self,
-        channel: Channel,
-        params: &NtcConfig,
-    ) -> Result<(), Error<B>> {
+    fn write_ntc_coefficients(&mut self, channel: Channel, params: &NtcConfig) -> Result<(), Error<B>> {
         let (rref_addr, abc_addr) = match channel {
             Channel::One => (Page1Reg::Rref1, Page1Reg::Ntc1A),
             Channel::Two => (Page1Reg::Rref2, Page1Reg::Ntc2A),
@@ -890,11 +910,7 @@ where
         Ok(())
     }
 
-    fn write_shunt_tc(
-        &mut self,
-        channel: Channel,
-        config: &ShuntTcConfig,
-    ) -> Result<(), Error<B>> {
+    fn write_shunt_tc(&mut self, channel: Channel, config: &ShuntTcConfig) -> Result<(), Error<B>> {
         let (tc_addr, tc2_addr) = match channel {
             Channel::One => (Page1Reg::Rs1Tc, Page1Reg::Rs1Tc2),
             Channel::Two => (Page1Reg::Rs2Tc, Page1Reg::Rs2Tc2),
@@ -913,12 +929,7 @@ where
         Ok(())
     }
 
-    fn write_slot_mux(
-        &mut self,
-        slot: Channel,
-        negative: MuxInput,
-        positive: MuxInput,
-    ) -> Result<(), Error<B>> {
+    fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Error<B>> {
         let addr_n = match slot {
             Channel::One => Page0Reg::Slot1MuxN,
             Channel::Two => Page0Reg::Slot2MuxN,
@@ -1173,16 +1184,14 @@ where
     /// helpers rewrite REGSCTRL without changing the selected page.
     fn regsctrl_base(&self) -> RegsCtrl {
         let page1 = matches!(self.current_page.unwrap_or(Page::Page0), Page::Page1);
-        RegsCtrl::new().with_rdcvconf(true).with_page(page1)
+        RegsCtrl::default().with_rdcvconf(true).with_page(page1)
     }
 
     fn select_page(&mut self, page: Page) -> Result<(), Error<B>> {
         if self.current_page == Some(page) {
             return Ok(());
         }
-        let value = RegsCtrl::new()
-            .with_rdcvconf(true)
-            .with_page(matches!(page, Page::Page1));
+        let value = RegsCtrl::default().with_rdcvconf(true).with_page(matches!(page, Page::Page1));
         self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())?;
         self.current_page = Some(page);
         Ok(())
@@ -1346,4 +1355,3 @@ fn build_cmd16(cmd: u16) -> [u8; 4] {
     frame[3] = pec[1];
     frame
 }
-

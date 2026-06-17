@@ -250,10 +250,10 @@ fn wake_up_invalidates_page_cache() {
     expect_write(&mut mock, dcmd_write_bytes(0xDF, &[0x00]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::new()).unwrap();
+    client.write_adcconf(AdcConf::default()).unwrap();
     client.start_wake_up().unwrap();
     client.confirm_wake_up().unwrap();
-    client.write_adcconf(AdcConf::new()).unwrap();
+    client.write_adcconf(AdcConf::default()).unwrap();
 }
 
 #[test]
@@ -302,7 +302,14 @@ fn read_accumulators2_reads_from_row_0x10() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     let acc = client.read_accumulators2().unwrap();
-    assert_eq!(acc, Accumulators { charge: 0, energy: 0, time: 0 });
+    assert_eq!(
+        acc,
+        Accumulators {
+            charge: 0,
+            energy: 0,
+            time: 0
+        }
+    );
 }
 
 #[test]
@@ -340,7 +347,7 @@ fn write_opctrl_cont_emits_dcmd_with_bit3_set() {
     expect_write(&mut mock, dcmd_write_bytes(0xF0, &[0x08]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_opctrl(OpCtrl::new().with_cont(true)).unwrap();
+    client.write_opctrl(OpCtrl::default().with_cont(true)).unwrap();
 }
 
 #[test]
@@ -351,9 +358,7 @@ fn write_opctrl_sleep_and_rst_emits_correct_byte() {
     expect_write(&mut mock, dcmd_write_bytes(0xF0, &[0x81]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_opctrl(OpCtrl::new().with_sleep(true).with_rst(true))
-        .unwrap();
+    client.write_opctrl(OpCtrl::default().with_sleep(true).with_rst(true)).unwrap();
 }
 
 #[test]
@@ -365,7 +370,7 @@ fn write_factrl_enables_fast_channels_1_and_2() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client
-        .write_factrl(FaCtrl::new().with_fach1(true).with_fach2(true))
+        .write_factrl(FaCtrl::default().with_fach1(true).with_fach2(true))
         .unwrap();
 }
 
@@ -377,7 +382,7 @@ fn write_adcconf_uses_page1_and_writes_to_0xdf() {
     expect_write(&mut mock, dcmd_write_bytes(0xDF, &[0x08]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::new().with_ntc1(true)).unwrap();
+    client.write_adcconf(AdcConf::default().with_ntc1(true)).unwrap();
 }
 
 #[test]
@@ -390,8 +395,8 @@ fn write_opctrl_then_write_factrl_only_selects_page_once() {
     expect_write(&mut mock, dcmd_write_bytes(0xF5, &[0x01])); // FACTRL.FACONV
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_opctrl(OpCtrl::new().with_cont(true)).unwrap();
-    client.write_factrl(FaCtrl::new().with_faconv(true)).unwrap();
+    client.write_opctrl(OpCtrl::default().with_cont(true)).unwrap();
+    client.write_factrl(FaCtrl::default().with_faconv(true)).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +540,7 @@ fn page1_write_then_page0_read_toggles_page_bit() {
     expect_dcmd_read(&mut mock, 0x80, &[0x00]);
 
     let mut client = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::new().with_ntc1(true)).unwrap();
+    client.write_adcconf(AdcConf::default().with_ntc1(true)).unwrap();
     let _ = client.read_status().unwrap();
 }
 
@@ -615,9 +620,7 @@ fn write_ntc1_coefficients_sends_rref_then_abc_burst() {
     expect_write(&mut mock, dcmd_write_bytes(0xD0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_ntc_coefficients(Channel::One, &NTCLE203E_EXAMPLE)
-        .unwrap();
+    client.write_ntc_coefficients(Channel::One, &NTCLE203E_EXAMPLE).unwrap();
 }
 
 #[test]
@@ -634,9 +637,7 @@ fn write_ntc2_coefficients_targets_distinct_addresses() {
     expect_write(&mut mock, dcmd_write_bytes(0xE0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE)
-        .unwrap();
+    client.write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE).unwrap();
 }
 
 #[test]
@@ -658,12 +659,8 @@ fn write_ntc1_then_ntc2_only_selects_page1_once() {
     expect_write(&mut mock, dcmd_write_bytes(0xE0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_ntc_coefficients(Channel::One, &NTCLE203E_EXAMPLE)
-        .unwrap();
-    client
-        .write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE)
-        .unwrap();
+    client.write_ntc_coefficients(Channel::One, &NTCLE203E_EXAMPLE).unwrap();
+    client.write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -741,9 +738,7 @@ fn write_slot_mux_channel1_writes_two_byte_burst_at_0xeb() {
     expect_write(&mut mock, dcmd_write_bytes(0xEB, &[0x00, 0x01]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_slot_mux(Channel::One, MuxInput::Agnd, MuxInput::V1)
-        .unwrap();
+    client.write_slot_mux(Channel::One, MuxInput::Agnd, MuxInput::V1).unwrap();
 }
 
 #[test]
@@ -754,9 +749,7 @@ fn write_slot_mux_channel2_writes_to_0xed() {
     expect_write(&mut mock, dcmd_write_bytes(0xED, &[15, 16]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client
-        .write_slot_mux(Channel::Two, MuxInput::VbatM, MuxInput::VbatP)
-        .unwrap();
+    client.write_slot_mux(Channel::Two, MuxInput::VbatM, MuxInput::VbatP).unwrap();
 }
 
 #[test]
