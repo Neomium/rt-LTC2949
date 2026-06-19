@@ -269,6 +269,18 @@ pub const T_READY_US: u32 = 20;
 pub const T_MLCK_US: u32 = 130_000;
 
 // ---------------------------------------------------------------------------
+// DCMD framing constants
+// ---------------------------------------------------------------------------
+
+/// Fixed PECC field (datasheet Table 12): 16 data bytes per PEC group.
+const PECC: u8 = 15;
+/// Max data bytes covered by one PEC group (`PECC + 1`).
+const N_PER_PEC: usize = 16;
+/// Whole 3-byte FIFO samples that fit one PEC group (`16 / 3 = 5`). Reading several samples
+/// per DCMD amortises the ~9-byte header/PEC overhead instead of paying it per sample.
+const FIFO_SAMPLES_PER_BURST: usize = N_PER_PEC / 3;
+
+// ---------------------------------------------------------------------------
 // Register map (only the entries we expose are named; full map is in the
 // datasheet, sections "Register Map PAGE0/PAGE1").
 // ---------------------------------------------------------------------------
@@ -1114,19 +1126,26 @@ where
     }
 
     fn read_fifo<const N: usize>(&mut self, reg: Page0Reg) -> Result<Vec<FifoSample, N>, Error<B>> {
-        // Read 3·N bytes from the (non-incrementing) FIFO register.
-        // Stack-allocated buffer up to a safe maximum; bail if N is unreasonable.
+        // The FIFO register is non-incrementing: each 3-byte group within a burst pops the
+        // next sample (datasheet "Reading the FIFOs"), so one DCMD read of 3·k bytes yields
+        // k samples. Drain in bursts and stop at the first non-`Ok` tag (kept as terminator).
         let mut samples: Vec<FifoSample, N> = Vec::new();
-        let mut three = [0u8; 3];
-        for _ in 0..N {
-            self.read_bytes(reg, &mut three)?;
-            let raw = ((three[0] as u16) << 8 | three[1] as u16) as i16;
-            let tag = FifoTag::from_byte(three[2]);
-            let stop = !matches!(tag, FifoTag::Ok);
-            let _ = samples.push(FifoSample { raw, tag });
-            if stop {
-                break;
+        let mut buf = [0u8; FIFO_SAMPLES_PER_BURST * 3];
+        let mut remaining = N;
+        while remaining > 0 {
+            let batch = remaining.min(FIFO_SAMPLES_PER_BURST);
+            let bytes = &mut buf[..batch * 3];
+            self.read_bytes(reg, bytes)?;
+            for sample in bytes.chunks_exact(3) {
+                let raw = ((sample[0] as u16) << 8 | sample[1] as u16) as i16;
+                let tag = FifoTag::from_byte(sample[2]);
+                let stop = !matches!(tag, FifoTag::Ok);
+                let _ = samples.push(FifoSample { raw, tag });
+                if stop {
+                    return Ok(samples);
+                }
             }
+            remaining -= batch;
         }
         Ok(samples)
     }
@@ -1226,13 +1245,9 @@ where
     // (`PECC = N-1`, range 0..=15). The ID byte itself carries redundancy so it is not
     // covered by a PEC.
 
-    /// Fixed PECC of 15 (16 data bytes per PEC); shorter bursts just emit one PEC at the end.
-    const PECC: u8 = 15;
-    const N_PER_PEC: usize = 16;
-
     /// Constructs the ID byte for a DCMD (datasheet Table 12).
     fn make_id(read: bool) -> u8 {
-        let pecc = Self::PECC & 0x0F;
+        let pecc = PECC & 0x0F;
         let p3 = (pecc >> 3) & 1;
         let p2 = (pecc >> 2) & 1;
         let p1 = (pecc >> 1) & 1;
@@ -1244,20 +1259,11 @@ where
         (rw << 7) | (not_rw << 6) | (bit5 << 5) | (p3 << 4) | (p2 << 3) | (bit2 << 2) | (p1 << 1) | p0
     }
 
-    /// Sends a DCMD write transaction.
+    /// Sends a DCMD write transaction. `data` must fit one PEC group (≤ 16 bytes); every
+    /// caller already stays within that (the 9-byte NTC burst is the largest).
     fn dcmd_write(&mut self, addr: u8, data: &[u8]) -> Result<(), Error<B>> {
-        // Compose the entire transaction in a stack buffer. The maximum frame size we
-        // support in one call is 4 (header+PEC) + 1 (ID) + 16 (data) + 2 (PEC) = 23
-        // bytes. If a caller hands us more than 16 data bytes we fall back to chunking
-        // (only the FIFO drain and accumulator paths can plausibly need this, and they
-        // already chunk via repeated short reads).
-        if data.len() > Self::N_PER_PEC {
-            // Chunk recursively. Each chunk gets its own DCMD frame.
-            for (i, chunk) in data.chunks(Self::N_PER_PEC).enumerate() {
-                self.dcmd_write(addr.wrapping_add((i * Self::N_PER_PEC) as u8), chunk)?;
-            }
-            return Ok(());
-        }
+        // Frame: 4 (header+PEC) + 1 (ID) + ≤16 (data) + 2 (PEC) = 23 bytes max.
+        debug_assert!(data.len() <= N_PER_PEC, "DCMD write exceeds one PEC group");
 
         let mut frame = [0u8; 23];
         frame[0] = 0xFE;
@@ -1282,14 +1288,9 @@ where
     // -- DCMD direct read -------------------------------------------------
 
     /// Direct `DCMD` read: data appears on MISO after the 5-byte header, then the PEC.
-    /// Reads over one PEC group (16 bytes) split into chunks at auto-incremented addresses.
+    /// `buf` must fit one PEC group (≤ 16 bytes); the 16-byte accumulator row is the largest.
     fn dcmd_read(&mut self, addr: u8, buf: &mut [u8]) -> Result<(), Error<B>> {
-        if buf.len() > Self::N_PER_PEC {
-            for (i, chunk) in buf.chunks_mut(Self::N_PER_PEC).enumerate() {
-                self.dcmd_read(addr.wrapping_add((i * Self::N_PER_PEC) as u8), chunk)?;
-            }
-            return Ok(());
-        }
+        debug_assert!(buf.len() <= N_PER_PEC, "DCMD read exceeds one PEC group");
 
         let n = buf.len();
         // MOSI: header (4) + ID (1) + n dummy data bytes + 2 dummy PEC bytes.

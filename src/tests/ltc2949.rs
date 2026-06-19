@@ -14,8 +14,8 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::ltc2949::{
-    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, FaCtrl, Ltc2949Client, MuxInput, NtcConfig,
-    OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, FaCtrl, FifoTag, Ltc2949Client, MuxInput,
+    NtcConfig, OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::mocks::MockSPIDevice;
 use crate::pec15::PEC15;
@@ -764,4 +764,80 @@ fn mux_input_discriminants_match_datasheet_table_57() {
     assert_eq!(20, MuxInput::Cf1P as u8);
     assert_eq!(22, MuxInput::Vref2 as u8);
     assert_eq!(23, MuxInput::Vref2Via250k as u8);
+}
+
+// ---------------------------------------------------------------------------
+// FIFO drain — bursts of up to 5 samples (15 bytes) per DCMD read
+// ---------------------------------------------------------------------------
+
+/// Encodes one FIFO sample as the device returns it: MSB, LSB, TAG.
+fn fifo_sample_bytes(raw: i16, tag: u8) -> [u8; 3] {
+    let [msb, lsb] = raw.to_be_bytes();
+    [msb, lsb, tag]
+}
+
+#[test]
+fn read_fifo_i1_drains_three_samples_in_one_burst() {
+    // N = 3 ≤ 5, so a single DCMD read of 9 bytes from FIFOI1 (0xF7) returns all three.
+    let mut data = Vec::new();
+    data.extend_from_slice(&fifo_sample_bytes(258, 0x00)); // 0x0102, Ok
+    data.extend_from_slice(&fifo_sample_bytes(772, 0x00)); // 0x0304, Ok
+    data.extend_from_slice(&fifo_sample_bytes(-1, 0x00)); // 0xFFFF, Ok
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xF7, &data);
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    let samples = client.read_fifo_i1::<3>().unwrap();
+
+    assert_eq!(3, samples.len());
+    assert_eq!(258, samples[0].raw);
+    assert_eq!(772, samples[1].raw);
+    assert_eq!(-1, samples[2].raw);
+    assert!(samples.iter().all(|s| s.tag == FifoTag::Ok));
+}
+
+#[test]
+fn read_fifo_stops_at_non_ok_terminator_within_a_burst() {
+    // N = 5 → one 15-byte burst. The 2nd sample is ReadOverrun (0x55); the drain keeps it
+    // as the terminator and returns immediately, ignoring the rest of the burst.
+    let mut data = Vec::new();
+    data.extend_from_slice(&fifo_sample_bytes(100, 0x00)); // Ok
+    data.extend_from_slice(&fifo_sample_bytes(0, 0x55)); // ReadOverrun — stop here
+    data.extend_from_slice(&fifo_sample_bytes(0, 0x00)); // never inspected
+    data.extend_from_slice(&fifo_sample_bytes(0, 0x00));
+    data.extend_from_slice(&fifo_sample_bytes(0, 0x00));
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xF7, &data);
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    let samples = client.read_fifo_i1::<5>().unwrap();
+
+    assert_eq!(2, samples.len());
+    assert_eq!(FifoTag::Ok, samples[0].tag);
+    assert_eq!(FifoTag::ReadOverrun, samples[1].tag);
+}
+
+#[test]
+fn read_fifo_spans_two_bursts_for_more_than_five_samples() {
+    // N = 7 → first burst 5 samples (15 bytes), second burst 2 samples (6 bytes), both from
+    // the non-incrementing FIFOI2 (0xF8). The page is selected once and cached.
+    let first: Vec<u8> = (0..5).flat_map(|i| fifo_sample_bytes(i as i16, 0x00)).collect();
+    let second: Vec<u8> = (5..7).flat_map(|i| fifo_sample_bytes(i as i16, 0x00)).collect();
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xF8, &first);
+    expect_dcmd_read(&mut mock, 0xF8, &second);
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    let samples = client.read_fifo_i2::<7>().unwrap();
+
+    assert_eq!(7, samples.len());
+    for (i, s) in samples.iter().enumerate() {
+        assert_eq!(i as i16, s.raw);
+    }
 }
