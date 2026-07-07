@@ -327,6 +327,8 @@ pub enum Page0Reg {
     Slot2MuxN = 0xED,
     Slot2MuxP = 0xEE,
     ExtFaults = 0xDC,
+    Occ1Ctrl = 0xDE,
+    Occ2Ctrl = 0xDF,
     Faults = 0xDD,
     OpCtrl = 0xF0,
     FCurGpioCtrl = 0xF1,
@@ -532,6 +534,16 @@ pub struct Accumulators {
     pub time: u32,
 }
 
+///Overcurrent Control Registers Table 50 & 51
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct OverCurrentConfig {
+    pub enable: bool,
+    pub threshold: u8,
+    pub deglitch_time: u8,
+    pub polarity: u8,
+}
+
+
 // ---------------------------------------------------------------------------
 // NTC linearisation
 // ---------------------------------------------------------------------------
@@ -728,6 +740,11 @@ pub trait Ltc2949Client {
     /// reads (datasheet Tables 57 & 58). NTCs typically use `(Vx, Agnd)`.
     fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Self::Error>;
 
+    /// Writes GPIO Control
+    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error>;
+
+    fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error>;
+
     /// Reads the STATUS register (raw byte, datasheet Table 26).
     fn read_status(&mut self) -> Result<u8, Self::Error>;
 
@@ -817,6 +834,9 @@ pub trait Ltc2949Client {
     /// Broadcast ADCV (0x0260): synchronous fast conversion on the LTC2949 and every cell
     /// monitor. **Hazard:** also restarts the chain, so don't call it from a separate meter task.
     fn trigger_adcv_broadcast(&mut self) -> Result<(), Self::Error>;
+
+    /// Send ADAX adressed
+    fn trigger_adax(&mut self) -> Result<(), Self::Error>;
 }
 
 /// LTC2949 client for the parallel-to-daisy-chain topology (datasheet Figure 12(B)),
@@ -949,6 +969,17 @@ where
         // MUXN and MUXP are adjacent (0xEB/0xEC for SLOT1, 0xED/0xEE for SLOT2)
         // so a single 2-byte burst configures both.
         self.write_bytes(addr_n, &[negative as u8, positive as u8])
+    }
+    
+    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
+        self.write_bytes(Page0Reg::FGpioCtrl, &[gpio])
+    }
+
+    fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
+        let b = config1.enable as u8 + config1.threshold << 1 + config1.deglitch_time << 4 + config1.polarity << 6;
+        self.write_bytes(Page0Reg::Occ1Ctrl, &[b])?;
+        let b2 = config2.enable as u8 + config2.threshold << 1 + config2.deglitch_time << 4 + config2.polarity << 6;
+        self.write_bytes(Page0Reg::Occ1Ctrl, &[b2])
     }
 
     fn read_status(&mut self) -> Result<u8, Error<B>> {
@@ -1094,6 +1125,10 @@ where
         // For LTC2949 the exact bitmap variant (Normal mode, all cells) is don't-care; it
         // simply triggers the fast channels selected by FACTRL.
         self.send_cmd16(0x0260)
+    }
+
+    fn trigger_adax(&mut self) -> Result<(), Error<B>> {
+        self.send_cmd16(0x0460)
     }
 }
 
