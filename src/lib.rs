@@ -36,8 +36,7 @@
 //! * Slow-mode result registers (`I1`, `I2`, `P1`, `P2`, `BAT`, `TEMP`, `VCC`, `SLOT1/2`).
 //! * Accumulators (charge `C1..C3`, energy `E1/E2/E4`, time `TB1..TB4`), plus the
 //!   memory-lock handshake for coherent multi-register snapshots.
-//! * Status/fault registers (`STATUS`, `FAULTS`, `EXTFAULTS`); `STATUS` is decoded,
-//!   fault registers are exposed as raw bytes.
+//! * Decoded status/fault registers (`STATUS`, `FAULTS`, `EXTFAULTS`).
 //! * Fast mode trigger (`FACTRL`, broadcast `ADCV`) and FIFO drain.
 //! * Steinhart–Hart linearisation coefficients for the two NTC channels
 //!   ([`client::Client::write_ntc_coefficients`]), including the `f32 → Float24` encoding.
@@ -85,8 +84,7 @@
 //! // MEASURE you'd need: client.write_opctrl(OpCtrl::default())?;
 //! //
 //! // It is also recommended to check STATUS / FAULTS / EXTFAULTS here and
-//! // clear any UVLO/POR flags. The driver exposes read_status(); the FAULTS
-//! // registers are not yet wrapped in typed accessors.
+//! // clear any UVLO/POR flags. All three registers have typed accessors.
 //! let _power_on_status = client.read_status()?;
 //!
 //! // ---- Step 2a – program NTC1 coefficients ----------------------------

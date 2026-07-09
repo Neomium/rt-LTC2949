@@ -42,10 +42,6 @@ const REGSCTRL_PAGE1: u8 = 0x81;
 /// `0x80 | 0x10 = 0x90`.
 const REGSCTRL_PAGE0_LOCK: u8 = 0x90;
 
-// ---------------------------------------------------------------------------
-// Frame builders
-// ---------------------------------------------------------------------------
-
 /// Constructs the exact byte sequence the driver should produce for a DCMD write of
 /// `data` to register `addr`.
 fn dcmd_write_bytes(addr: u8, data: &[u8]) -> Vec<u8> {
@@ -108,10 +104,6 @@ fn cmd16_bytes(cmd: u16) -> [u8; 4] {
     f
 }
 
-// ---------------------------------------------------------------------------
-// Mock expectation helpers
-// ---------------------------------------------------------------------------
-
 /// Records an expectation that the next `transaction()` call carries a single
 /// `Operation::Write` with exactly `expected` bytes.
 fn expect_write(mock: &mut MockSPIDevice, expected: Vec<u8>) {
@@ -163,10 +155,6 @@ fn expect_select_page(mock: &mut MockSPIDevice, page1: bool) {
     expect_write(mock, dcmd_write_bytes(0xFF, &[byte]));
 }
 
-// ---------------------------------------------------------------------------
-// DCMD ID-byte encoding (datasheet Table 12) — pure constants, no bus involved
-// ---------------------------------------------------------------------------
-
 /// Computes a DCMD ID byte from the read/write flag and the PECC field, mirroring
 /// the formula in [`crate::client`]. Used here only as a self-contained witness
 /// that our `DCMD_ID_WRITE` constant matches the datasheet encoding.
@@ -202,10 +190,6 @@ fn id_byte_write_pecc15_matches_driver_constant() {
 fn id_byte_write_pecc1_matches_datasheet_example() {
     assert_eq!(0x45, make_id(false, 1));
 }
-
-// ---------------------------------------------------------------------------
-// Command tests
-// ---------------------------------------------------------------------------
 
 #[test]
 fn trigger_adcv_broadcast_emits_0x0260_with_pec() {
@@ -273,8 +257,20 @@ fn read_faults_and_extfaults_read_correct_addresses() {
     expect_dcmd_read(&mut mock, 0xDC, &[0x99]); // EXTFAULTS
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    assert_eq!(client.read_faults().unwrap(), 0x42);
-    assert_eq!(client.read_extfaults().unwrap(), 0x99);
+    let faults = client.read_faults().unwrap();
+    assert!(faults.tsd());
+    assert!(faults.crccfg());
+    assert!(!faults.promerr());
+    assert!(!faults.crcmem());
+
+    let extfaults = client.read_extfaults().unwrap();
+    assert!(extfaults.hd1biterr());
+    assert!(extfaults.fcaerr());
+    assert!(extfaults.xramerr());
+    assert!(extfaults.hwmbistexec());
+    assert!(!extfaults.romerr());
+    assert!(!extfaults.memerr());
+    assert!(!extfaults.iramerr());
 }
 
 #[test]
@@ -343,10 +339,6 @@ fn memory_lock_request_read_unlock_sequence() {
     client.unlock_memory().unwrap();
     assert_eq!(charge, 1);
 }
-
-// ---------------------------------------------------------------------------
-// Writes
-// ---------------------------------------------------------------------------
 
 #[test]
 fn write_opctrl_cont_emits_dcmd_with_bit3_set() {
@@ -454,10 +446,6 @@ fn write_opctrl_then_write_factrl_only_selects_page_once() {
     client.write_factrl(FastControlRegister::default().with_faconv(true)).unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Reads (direct DCMD)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn read_uses_dcmd_read_frame_with_read_id() {
     // Verify the exact MOSI frame of a direct DCMD read: command header + read ID
@@ -475,9 +463,11 @@ fn read_uses_dcmd_read_frame_with_read_id() {
 
     let mut client = LTC2949::new(mock);
     let status = client.read_status().unwrap();
-    assert!(status.sleep());
-    assert!(status.measure());
-    assert!(status.fam());
+    assert!(status.uvloa());
+    assert!(status.uvlostby());
+    assert!(status.adcerr());
+    assert!(!status.pora());
+    assert!(!status.uvlod());
 }
 
 #[test]
@@ -503,13 +493,13 @@ fn read_status_decodes_bitfield() {
 
     let mut client = LTC2949::new(mock);
     let status = client.read_status().unwrap();
-    assert!(status.sleep());
-    assert!(status.standby());
-    assert!(status.measure());
-    assert!(status.faupd());
+    assert!(status.uvloa());
+    assert!(status.pora());
+    assert!(status.uvlostby());
+    assert!(status.uvlod());
+    assert!(status.update());
+    assert!(status.adcerr());
     assert!(status.tberr());
-    assert!(status.fam());
-    assert!(status.faults());
 }
 
 #[test]
@@ -590,10 +580,6 @@ fn read_time1_decodes_32bit_unsigned_be() {
     assert_eq!(0xDEAD_BEEF, client.read_time1().unwrap());
 }
 
-// ---------------------------------------------------------------------------
-// Page handling
-// ---------------------------------------------------------------------------
-
 #[test]
 fn page1_write_then_page0_read_toggles_page_bit() {
     // A page-1 write (ADCCONF) selects PAGE1; a subsequent page-0 read must
@@ -608,10 +594,6 @@ fn page1_write_then_page0_read_toggles_page_bit() {
     client.write_adcconf(AdcConfiguration::default().with_ntc1(true)).unwrap();
     let _ = client.read_status().unwrap();
 }
-
-// ---------------------------------------------------------------------------
-// NTC coefficient writes
-// ---------------------------------------------------------------------------
 
 /// The NTCLE203E worked example from datasheet Table 75 ("NTC1 Values in NTC
 /// Configuration Register"). Used as a canonical, end-to-end test vector.
@@ -681,10 +663,6 @@ fn write_ntc1_then_ntc2_only_selects_page1_once() {
     client.write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE).unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Shunt-resistor temperature compensation writes
-// ---------------------------------------------------------------------------
-
 /// Sense-resistor TC values from datasheet Table 76 (copper shunt nominally
 /// trimmed at 20 °C, TC = 3900 ppm/K, no second-order term).
 const COPPER_SHUNT_25C: ShuntTcConfig = ShuntTcConfig {
@@ -726,10 +704,6 @@ fn write_shunt_tc_channel2_targets_distinct_addresses() {
     client.write_shunt_tc(Channel::Two, &COPPER_SHUNT_25C).unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// SLOT mux configuration
-// ---------------------------------------------------------------------------
-
 #[test]
 fn write_slot_mux_channel1_writes_two_byte_burst_at_0xeb() {
     // SLOT1MUXN at 0xEB, SLOT1MUXP at 0xEC. Driver emits them as one burst.
@@ -766,10 +740,6 @@ fn mux_input_discriminants_match_datasheet_table_57() {
     assert_eq!(22, MuxInput::Vref2 as u8);
     assert_eq!(23, MuxInput::Vref2Via250k as u8);
 }
-
-// ---------------------------------------------------------------------------
-// FIFO drain — bursts of up to 5 samples (15 bytes) per DCMD read
-// ---------------------------------------------------------------------------
 
 /// Encodes one FIFO sample as the device returns it: MSB, LSB, TAG.
 fn fifo_sample_bytes(raw: i16, tag: u8) -> [u8; 3] {

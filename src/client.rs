@@ -337,23 +337,70 @@ impl Default for RegControlRegister {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub struct StatusRegister {
-    /// SLEEP: the core is in SLEEP mode.
-    pub sleep: bool,
-    /// STANDBY: the core is in STANDBY mode.
-    pub standby: bool,
-    /// MEASURE: the core is in MEASURE mode.
-    pub measure: bool,
-    /// FAUPD: fast-channel result update indicator.
-    pub faupd: bool,
-    /// TBERR: time-base error indicator.
+    /// UVLOA: analog supply undervoltage lockout occurred.
+    pub uvloa: bool,
+    /// PORA: analog supply power-on reset occurred.
+    pub pora: bool,
+    /// UVLOSTBY: standby regulator undervoltage lockout occurred.
+    pub uvlostby: bool,
+    /// UVLOD: digital supply undervoltage lockout occurred.
+    pub uvlod: bool,
+    /// UPDATE: result registers have been updated.
+    pub update: bool,
+    /// ADCERR: ADC error occurred.
+    pub adcerr: bool,
+    /// TBERR: time-base error occurred.
     pub tberr: bool,
-    /// FAM: fast-acquisition mode indicator.
-    pub fam: bool,
-    /// FAULTS: one or more fault bits are set in `FAULTS`/`EXTFAULTS`.
-    pub faults: bool,
     // Reserved bit 7.
     #[skip]
     __: B1,
+}
+
+/// Fault register (PAGE0, 0xDD; datasheet Table 28).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct FaultsRegister {
+    /// PROMERR: PROM read error occurred.
+    pub promerr: bool,
+    /// TSD: thermal shutdown occurred.
+    pub tsd: bool,
+    /// INTCOMMERR: internal communication error occurred.
+    pub intcommerr: bool,
+    /// EXTCOMMERR: external communication error occurred.
+    pub extcommerr: bool,
+    /// FAERR: fast-acquisition error occurred.
+    pub faerr: bool,
+    /// HWBIST: hardware built-in self-test failed.
+    pub hwbist: bool,
+    /// CRCCFG: configuration CRC error occurred.
+    pub crccfg: bool,
+    /// CRCMEM: memory CRC error occurred.
+    pub crcmem: bool,
+}
+
+/// Extended fault register (PAGE0, 0xDC; datasheet Table 33).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct ExtFaultsRegister {
+    /// HD1BITERR: Hamming decoder 1-bit error occurred.
+    pub hd1biterr: bool,
+    /// ROMERR: ROM CRC error occurred.
+    pub romerr: bool,
+    /// MEMERR: memory error occurred.
+    pub memerr: bool,
+    /// FCAERR: fast-channel error occurred.
+    pub fcaerr: bool,
+    /// XRAMERR: XRAM error occurred.
+    pub xramerr: bool,
+    /// IRAMERR: IRAM error occurred.
+    pub iramerr: bool,
+    // Reserved bit 6.
+    #[skip]
+    __: B1,
+    /// HWMBISTEXEC: memory BIST was executed.
+    pub hwmbistexec: bool,
 }
 
 /// FIFO sample tag values (datasheet Table 30).
@@ -562,12 +609,11 @@ pub trait Client {
     /// Reads and decodes the STATUS register (PAGE0, 0x80; datasheet Table 26).
     fn read_status(&mut self) -> Result<StatusRegister, Self::Error>;
 
-    /// Reads the FAULTS register (raw byte, datasheet 0xDD; UVLO/POR/self-test bits). No
-    /// typed bitfield yet — consult the datasheet for the bit map.
-    fn read_faults(&mut self) -> Result<u8, Self::Error>;
+    /// Reads and decodes the FAULTS register (PAGE0, 0xDD; datasheet Table 28).
+    fn read_faults(&mut self) -> Result<FaultsRegister, Self::Error>;
 
-    /// Reads the EXTFAULTS (extended faults) register (raw byte, datasheet 0xDC).
-    fn read_extfaults(&mut self) -> Result<u8, Self::Error>;
+    /// Reads and decodes the EXTFAULTS register (PAGE0, 0xDC; datasheet Table 33).
+    fn read_extfaults(&mut self) -> Result<ExtFaultsRegister, Self::Error>;
 
     /// Requests the memory lock (datasheet Figure 19, `MLK = 0b01`) for a cross-register
     /// snapshot; returns the wait ([`T_MLCK_US`]). Stay on one page, then [`unlock_memory`](Self::unlock_memory).
@@ -803,16 +849,16 @@ where
         Ok(StatusRegister::from_bytes(buf))
     }
 
-    fn read_faults(&mut self) -> Result<u8, Error<B>> {
+    fn read_faults(&mut self) -> Result<FaultsRegister, Error<B>> {
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::Faults, &mut buf)?;
-        Ok(buf[0])
+        Ok(FaultsRegister::from_bytes(buf))
     }
 
-    fn read_extfaults(&mut self) -> Result<u8, Error<B>> {
+    fn read_extfaults(&mut self) -> Result<ExtFaultsRegister, Error<B>> {
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::ExtFaults, &mut buf)?;
-        Ok(buf[0])
+        Ok(ExtFaultsRegister::from_bytes(buf))
     }
 
     // -- Memory lock (coherent multi-register snapshots) -------------------
