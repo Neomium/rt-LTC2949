@@ -135,8 +135,8 @@
 //! // After ≥100 ms of CONT, the result registers are populated. LSB sizes
 //! // are documented on each method; here are the conversions you'll
 //! // typically pair with each value.
-//! let i1_raw = client.read_current1()?;       // i32, LSB = 950 nV
-//! let v_shunt_uv = (i1_raw as i64) * 950 / 1_000;
+//! let i1 = client.read_current1()?;           // CurrentSenseVoltage
+//! let v_shunt_uv = (i1.decode() * 1_000_000.0) as i32;
 //! // For a 100 µΩ shunt: current_uA = v_shunt_uv * 10
 //!
 //! let bat_raw = client.read_bat()?;           // i16, LSB = 375 µV pin-to-pin
@@ -239,12 +239,12 @@
 //! let cell_voltages = chain.read_voltages(CellSelection::All).map_err(|_| ())?;
 //!
 //! // CH1 high-precision current (continuously updated while CONT is set).
-//! let i1_raw = meter.read_current1().map_err(|_| ())?; // i32, LSB = 950 nV
+//! let i1 = meter.read_current1().map_err(|_| ())?; // CurrentSenseVoltage
 //!
 //! // The CH2 fast snapshot triggered above is read from the LTC2949's fast path; the
 //! // FIFO drain (see the previous example, `read_fifo_i2`) is the supported route when
 //! // running fast-continuous (FACONV = 1).
-//! let _ = (cell_voltages, i1_raw);
+//! let _ = (cell_voltages, i1);
 //! # Ok(())
 //! # }
 //! ```

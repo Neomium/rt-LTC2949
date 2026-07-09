@@ -510,7 +510,9 @@ fn read_current1_decodes_24bit_signed_be() {
     expect_dcmd_read(&mut mock, 0x90, &[0xFF, 0xFF, 0xFF]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(-1, client.read_current1().unwrap());
+    let current = client.read_current1().unwrap();
+    assert_eq!(-1, current.raw());
+    assert!((current.decode() - -950e-9).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -521,7 +523,9 @@ fn read_current1_positive_value() {
     expect_dcmd_read(&mut mock, 0x90, &[0x00, 0x01, 0x23]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(0x000123, client.read_current1().unwrap());
+    let current = client.read_current1().unwrap();
+    assert_eq!(0x000123, current.raw());
+    assert!((current.decode() - 0.00027645).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -531,7 +535,9 @@ fn read_current1_avg_reads_moving_average_register() {
     expect_dcmd_read(&mut mock, 0x9C, &[0x00, 0x04, 0x00]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(0x000400, client.read_current1_avg().unwrap());
+    let current = client.read_current1_avg().unwrap();
+    assert_eq!(0x000400, current.raw());
+    assert!((current.decode() - 0.0002432).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -541,7 +547,9 @@ fn read_current2_avg_decodes_24bit_signed_be() {
     expect_dcmd_read(&mut mock, 0xAC, &[0xFF, 0xFE, 0x00]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(-512, client.read_current2_avg().unwrap());
+    let current = client.read_current2_avg().unwrap();
+    assert_eq!(-512, current.raw());
+    assert!((current.decode() - -0.0001216).abs() < f32::EPSILON);
 }
 
 #[test]

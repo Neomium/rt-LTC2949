@@ -173,6 +173,63 @@ pub enum RegAddressP1 {
     Rs2T0 = 0xEC,
 }
 
+/// Raw I1/I2 slow-mode current-sense voltage result.
+///
+/// The LTC2949 stores this as a signed ADC code. [`decode`](Self::decode) converts it to
+/// volts at the current sense inputs.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct CurrentSenseVoltage {
+    raw: i32,
+}
+
+impl CurrentSenseVoltage {
+    /// Voltage represented by one raw ADC code.
+    pub const LSB_VOLTS: f32 = 950e-9;
+
+    /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub const fn from_raw(raw: i32) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub fn raw(self) -> i32 {
+        self.raw
+    }
+
+    /// Decodes the raw ADC code into current-sense voltage in volts.
+    pub fn decode(self) -> f32 {
+        self.raw as f32 * Self::LSB_VOLTS
+    }
+}
+
+/// Raw I1AVG/I2AVG moving-average current-sense voltage result.
+///
+/// The averaged result has a 4x finer LSB than the unaveraged slow-mode current result.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct AveragedCurrentSenseVoltage {
+    raw: i32,
+}
+
+impl AveragedCurrentSenseVoltage {
+    /// Voltage represented by one raw ADC code.
+    pub const LSB_VOLTS: f32 = 237.5e-9;
+
+    /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub const fn from_raw(raw: i32) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub fn raw(self) -> i32 {
+        self.raw
+    }
+
+    /// Decodes the raw ADC code into current-sense voltage in volts.
+    pub fn decode(self) -> f32 {
+        self.raw as f32 * Self::LSB_VOLTS
+    }
+}
+
 /// A device register resolving to a memory [`Page`] and an on-bus address byte, so the
 /// framing helpers take a register and derive the page rather than threading both.
 trait Register: Copy {
@@ -624,20 +681,20 @@ pub trait Client {
     /// Releases the memory lock (`MLK = 0b00`), letting the register map update again.
     fn unlock_memory(&mut self) -> Result<(), Self::Error>;
 
-    /// Reads I1 (slow-mode current 1) as a 24-bit two's-complement value.
+    /// Reads I1 (slow-mode current 1) as a raw signed 24-bit current-sense voltage result.
     /// LSB = 950 nV.
-    fn read_current1(&mut self) -> Result<i32, Self::Error>;
+    fn read_current1(&mut self) -> Result<CurrentSenseVoltage, Self::Error>;
 
     /// Reads I2 (slow-mode current 2). LSB = 950 nV.
-    fn read_current2(&mut self) -> Result<i32, Self::Error>;
+    fn read_current2(&mut self) -> Result<CurrentSenseVoltage, Self::Error>;
 
     /// Reads I1AVG (moving average of the four preceding current 1 measurements).
     /// LSB = 237.5 nV.
-    fn read_current1_avg(&mut self) -> Result<i32, Self::Error>;
+    fn read_current1_avg(&mut self) -> Result<AveragedCurrentSenseVoltage, Self::Error>;
 
     /// Reads I2AVG (moving average of the four preceding current 2 measurements).
     /// LSB = 237.5 nV.
-    fn read_current2_avg(&mut self) -> Result<i32, Self::Error>;
+    fn read_current2_avg(&mut self) -> Result<AveragedCurrentSenseVoltage, Self::Error>;
 
     /// Reads P1 (power 1 or voltage if P1ASV is set). LSB = 5.8368 µV²/Ω (power) or
     /// 46.875 µV (voltage).
@@ -895,20 +952,22 @@ where
         self.dcmd_write(RegAddressP0::RegsCtrl.addr(), &value.into_bytes())
     }
 
-    fn read_current1(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(RegAddressP0::Current1)
+    fn read_current1(&mut self) -> Result<CurrentSenseVoltage, Error<B>> {
+        self.read_signed_24(RegAddressP0::Current1).map(CurrentSenseVoltage::from_raw)
     }
 
-    fn read_current2(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(RegAddressP0::Current2)
+    fn read_current2(&mut self) -> Result<CurrentSenseVoltage, Error<B>> {
+        self.read_signed_24(RegAddressP0::Current2).map(CurrentSenseVoltage::from_raw)
     }
 
-    fn read_current1_avg(&mut self) -> Result<i32, Error<B>> {
+    fn read_current1_avg(&mut self) -> Result<AveragedCurrentSenseVoltage, Error<B>> {
         self.read_signed_24(RegAddressP0::Current1Avg)
+            .map(AveragedCurrentSenseVoltage::from_raw)
     }
 
-    fn read_current2_avg(&mut self) -> Result<i32, Error<B>> {
+    fn read_current2_avg(&mut self) -> Result<AveragedCurrentSenseVoltage, Error<B>> {
         self.read_signed_24(RegAddressP0::Current2Avg)
+            .map(AveragedCurrentSenseVoltage::from_raw)
     }
 
     fn read_power1(&mut self) -> Result<i32, Error<B>> {
