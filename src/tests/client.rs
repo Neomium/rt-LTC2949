@@ -14,10 +14,10 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    float24_encode, float24_encode_high2, Accumulators, AdcConfiguration, Channel, Client, FastControlRegister,
-    FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US,
-    T_READY_US,
+    Accumulators, AdcConfiguration, Channel, Client, FastControlRegister, FifoTag, MuxInput, NtcConfig,
+    OpsControlRegister, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
+use crate::float24::Float24;
 use crate::mocks::MockSPIDevice;
 use crate::pec15::PEC15;
 use alloc::vec;
@@ -61,6 +61,14 @@ fn dcmd_write_bytes(addr: u8, data: &[u8]) -> Vec<u8> {
     v.push(data_pec[0]);
     v.push(data_pec[1]);
     v
+}
+
+fn f24(value: f32) -> [u8; 3] {
+    Float24::new(value).encode()
+}
+
+fn f24_high(value: f32) -> [u8; 2] {
+    Float24::new(value).encode_high()
 }
 
 /// Builds the expected MOSI frame and the MISO response for a DCMD read of `data.len()`
@@ -592,53 +600,6 @@ fn page1_write_then_page0_read_toggles_page_bit() {
 }
 
 // ---------------------------------------------------------------------------
-// Float24 encoding (datasheet Table 68 + Table 75 example values)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn float24_encode_zero_is_signed_zero() {
-    assert_eq!([0x00, 0x00, 0x00], float24_encode(0.0));
-    assert_eq!([0x80, 0x00, 0x00], float24_encode(-0.0));
-}
-
-#[test]
-fn float24_encode_matches_datasheet_example_0_95() {
-    // Datasheet Table 68 worked example: 0.95 → 0x3EE666.
-    assert_eq!([0x3E, 0xE6, 0x66], float24_encode(0.95));
-}
-
-#[test]
-fn float24_encode_matches_table_75_rref_10k() {
-    // RREF1 = 10 kΩ → 0x4C3880 (from the NTCLE203E example table).
-    assert_eq!([0x4C, 0x38, 0x80], float24_encode(10_000.0));
-}
-
-#[test]
-fn float24_encode_matches_table_75_coefficient_a() {
-    // NTC1A ≈ 1.1382e-3 → 0x352A5F.
-    assert_eq!([0x35, 0x2A, 0x5F], float24_encode(1.1382e-3));
-}
-
-#[test]
-fn float24_encode_matches_table_75_coefficient_b() {
-    // NTC1B ≈ 2.3267e-4 → 0x32E7F1.
-    assert_eq!([0x32, 0xE7, 0xF1], float24_encode(2.3267e-4));
-}
-
-#[test]
-fn float24_encode_matches_table_75_coefficient_c() {
-    // NTC1C ≈ 0.93243e-7 → 0x279079.
-    assert_eq!([0x27, 0x90, 0x79], float24_encode(0.93243e-7));
-}
-
-#[test]
-fn float24_encode_negative_value_sets_sign_bit() {
-    // Negation of 0.95: same magnitude bytes with bit 7 of byte 0 set.
-    let [b0, b1, b2] = float24_encode(0.95);
-    assert_eq!([b0 | 0x80, b1, b2], float24_encode(-0.95));
-}
-
-// ---------------------------------------------------------------------------
 // NTC coefficient writes
 // ---------------------------------------------------------------------------
 
@@ -657,13 +618,13 @@ fn write_ntc1_coefficients_sends_rref_then_abc_burst() {
     expect_select_page(&mut mock, true);
 
     // 1) 3-byte write of RREF1 at p1.0xAA.
-    expect_write(&mut mock, dcmd_write_bytes(0xAA, &float24_encode(10_000.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xAA, &f24(10_000.0)));
 
     // 2) 9-byte burst writing NTC1A | NTC1B | NTC1C at p1.0xD0.
     let mut abc = vec![0u8; 9];
-    abc[0..3].copy_from_slice(&float24_encode(1.1382e-3));
-    abc[3..6].copy_from_slice(&float24_encode(2.3267e-4));
-    abc[6..9].copy_from_slice(&float24_encode(0.93243e-7));
+    abc[0..3].copy_from_slice(&f24(1.1382e-3));
+    abc[3..6].copy_from_slice(&f24(2.3267e-4));
+    abc[6..9].copy_from_slice(&f24(0.93243e-7));
     expect_write(&mut mock, dcmd_write_bytes(0xD0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
@@ -676,11 +637,11 @@ fn write_ntc2_coefficients_targets_distinct_addresses() {
     expect_select_page(&mut mock, true);
 
     // RREF2 lives at p1.0xAD, the NTC2A/B/C burst at p1.0xE0.
-    expect_write(&mut mock, dcmd_write_bytes(0xAD, &float24_encode(10_000.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xAD, &f24(10_000.0)));
     let mut abc = vec![0u8; 9];
-    abc[0..3].copy_from_slice(&float24_encode(1.1382e-3));
-    abc[3..6].copy_from_slice(&float24_encode(2.3267e-4));
-    abc[6..9].copy_from_slice(&float24_encode(0.93243e-7));
+    abc[0..3].copy_from_slice(&f24(1.1382e-3));
+    abc[3..6].copy_from_slice(&f24(2.3267e-4));
+    abc[6..9].copy_from_slice(&f24(0.93243e-7));
     expect_write(&mut mock, dcmd_write_bytes(0xE0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
@@ -694,37 +655,20 @@ fn write_ntc1_then_ntc2_only_selects_page1_once() {
     expect_select_page(&mut mock, true);
 
     // NTC1
-    expect_write(&mut mock, dcmd_write_bytes(0xAA, &float24_encode(10_000.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xAA, &f24(10_000.0)));
     let mut abc = vec![0u8; 9];
-    abc[0..3].copy_from_slice(&float24_encode(1.1382e-3));
-    abc[3..6].copy_from_slice(&float24_encode(2.3267e-4));
-    abc[6..9].copy_from_slice(&float24_encode(0.93243e-7));
+    abc[0..3].copy_from_slice(&f24(1.1382e-3));
+    abc[3..6].copy_from_slice(&f24(2.3267e-4));
+    abc[6..9].copy_from_slice(&f24(0.93243e-7));
     expect_write(&mut mock, dcmd_write_bytes(0xD0, &abc));
 
     // NTC2 (no extra select_page).
-    expect_write(&mut mock, dcmd_write_bytes(0xAD, &float24_encode(10_000.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xAD, &f24(10_000.0)));
     expect_write(&mut mock, dcmd_write_bytes(0xE0, &abc));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client.write_ntc_coefficients(Channel::One, &NTCLE203E_EXAMPLE).unwrap();
     client.write_ntc_coefficients(Channel::Two, &NTCLE203E_EXAMPLE).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Float24 truncated-to-2-bytes (RSnT0 reference temperature)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn float24_encode_high2_drops_low_byte() {
-    // 0.95 → 0x3EE666; truncated → 0x3EE6.
-    assert_eq!([0x3E, 0xE6], float24_encode_high2(0.95));
-}
-
-#[test]
-fn float24_encode_high2_matches_table_76_row() {
-    // RS1T0 reference temperature = 20 °C → 0x4340 (datasheet Table 76).
-    // The bottom byte is unrepresented and the device assumes 0.
-    assert_eq!([0x43, 0x40], float24_encode_high2(20.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -746,12 +690,12 @@ fn write_shunt_tc_channel1_sends_burst_then_tc2() {
 
     // 5-byte burst at p1.0xD9 = RSnTC (3 bytes) || RSnT0 (2 bytes).
     let mut burst = vec![0u8; 5];
-    burst[0..3].copy_from_slice(&float24_encode(0.0039));
-    burst[3..5].copy_from_slice(&float24_encode_high2(20.0));
+    burst[0..3].copy_from_slice(&f24(0.0039));
+    burst[3..5].copy_from_slice(&f24_high(20.0));
     expect_write(&mut mock, dcmd_write_bytes(0xD9, &burst));
 
     // 3-byte write of RS1TC2 at p1.0x5C.
-    expect_write(&mut mock, dcmd_write_bytes(0x5C, &float24_encode(0.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0x5C, &f24(0.0)));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client.write_shunt_tc(Channel::One, &COPPER_SHUNT_25C).unwrap();
@@ -763,10 +707,10 @@ fn write_shunt_tc_channel2_targets_distinct_addresses() {
     expect_select_page(&mut mock, true);
 
     let mut burst = vec![0u8; 5];
-    burst[0..3].copy_from_slice(&float24_encode(0.0039));
-    burst[3..5].copy_from_slice(&float24_encode_high2(20.0));
+    burst[0..3].copy_from_slice(&f24(0.0039));
+    burst[3..5].copy_from_slice(&f24_high(20.0));
     expect_write(&mut mock, dcmd_write_bytes(0xE9, &burst)); // RS2TC + RS2T0
-    expect_write(&mut mock, dcmd_write_bytes(0x7C, &float24_encode(0.0))); // RS2TC2
+    expect_write(&mut mock, dcmd_write_bytes(0x7C, &f24(0.0))); // RS2TC2
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client.write_shunt_tc(Channel::Two, &COPPER_SHUNT_25C).unwrap();

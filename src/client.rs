@@ -55,6 +55,7 @@
 // `unused_parens` lint on newer rustc. Silence the lint module-wide.
 #![allow(unused_parens)]
 
+use crate::float24::Float24;
 use crate::pec15::PEC15;
 use crate::polling::{NoPolling, PollMethod};
 use embedded_hal::spi::{Operation, SpiDevice};
@@ -415,49 +416,6 @@ pub struct NtcConfig {
     pub c: f32,
 }
 
-/// Encodes an `f32` as MSB-first Float24 (datasheet Table 68): 1 sign, 7-bit exponent
-/// biased 63, 16-bit mantissa. Out-of-range values clamp to ±0 or the largest magnitude.
-pub(crate) fn float24_encode(value: f32) -> [u8; 3] {
-    let bits = value.to_bits();
-    let sign = (bits >> 31) & 1;
-    let f32_exp = (bits >> 23) & 0xFF;
-    let f32_mantissa = bits & 0x7F_FFFF;
-
-    // Zero / subnormal — encode as signed zero. Float24 has no subnormal range
-    // worth caring about for our use cases.
-    if f32_exp == 0 {
-        return [(sign as u8) << 7, 0, 0];
-    }
-
-    // Re-bias: f32 bias 127 → Float24 bias 63 → subtract 64. Clamp to the
-    // 7-bit Float24 exponent range.
-    let exp_signed = f32_exp as i32 - 64;
-    let (float24_exp, float24_mantissa) = if exp_signed < 1 {
-        // Underflow → signed zero.
-        (0u32, 0u32)
-    } else if exp_signed > 0x7E {
-        // Overflow → largest finite magnitude (exp=0x7E, mantissa=all-ones).
-        (0x7E, 0xFFFF)
-    } else {
-        // Truncate mantissa from 23 to 16 bits.
-        (exp_signed as u32, f32_mantissa >> 7)
-    };
-
-    let encoded = (sign << 23) | (float24_exp << 16) | float24_mantissa;
-    [
-        ((encoded >> 16) & 0xFF) as u8,
-        ((encoded >> 8) & 0xFF) as u8,
-        (encoded & 0xFF) as u8,
-    ]
-}
-
-/// Like [`float24_encode`] but returns only the top two bytes, for the 16-bit `RSxT0`
-/// registers (datasheet Table 71; the device treats the missing mantissa LSB as 0).
-pub(crate) fn float24_encode_high2(value: f32) -> [u8; 2] {
-    let [b0, b1, _] = float24_encode(value);
-    [b0, b1]
-}
-
 /// Sense-resistor temperature-drift compensation: `R(T) = R0·[1 + tc·(T-t_ref) + tc2·(T-t_ref)²]`,
 /// `T` being the linearised NTC reading. Copper ≈ `0.0039 /K`; low-TC alloys can stay uncompensated.
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -758,13 +716,13 @@ where
             Channel::Two => (RegAddressP1::Rref2, RegAddressP1::Ntc2A),
         };
 
-        let rref = float24_encode(params.r_ref);
+        let rref = Float24::new(params.r_ref).encode();
         self.write_bytes(rref_addr, &rref)?;
 
         let mut abc = [0u8; 9];
-        abc[0..3].copy_from_slice(&float24_encode(params.a));
-        abc[3..6].copy_from_slice(&float24_encode(params.b));
-        abc[6..9].copy_from_slice(&float24_encode(params.c));
+        abc[0..3].copy_from_slice(&Float24::new(params.a).encode());
+        abc[3..6].copy_from_slice(&Float24::new(params.b).encode());
+        abc[6..9].copy_from_slice(&Float24::new(params.c).encode());
         self.write_bytes(abc_addr, &abc)?;
 
         Ok(())
@@ -778,12 +736,12 @@ where
 
         // RSnTC (3 bytes Float24) + RSnT0 (2 bytes truncated Float24).
         let mut tc_burst = [0u8; 5];
-        tc_burst[0..3].copy_from_slice(&float24_encode(config.tc));
-        tc_burst[3..5].copy_from_slice(&float24_encode_high2(config.t_ref));
+        tc_burst[0..3].copy_from_slice(&Float24::new(config.tc).encode());
+        tc_burst[3..5].copy_from_slice(&Float24::new(config.t_ref).encode_high());
         self.write_bytes(tc_addr, &tc_burst)?;
 
         // RSnTC2 lives elsewhere on the page.
-        let tc2 = float24_encode(config.tc2);
+        let tc2 = Float24::new(config.tc2).encode();
         self.write_bytes(tc2_addr, &tc2)?;
 
         Ok(())

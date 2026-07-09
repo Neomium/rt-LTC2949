@@ -260,6 +260,7 @@ pub use heapless;
 pub mod client;
 #[cfg(feature = "example")]
 pub mod example;
+pub mod float24;
 pub mod polling;
 pub mod spi;
 
