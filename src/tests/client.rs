@@ -15,7 +15,7 @@
 
 use crate::client::{
     float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, Client, FaCtrl, FifoTag, MuxInput, NtcConfig,
-    OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    OpCtrl, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::mocks::MockSPIDevice;
 use crate::pec15::PEC15;
@@ -372,6 +372,50 @@ fn write_factrl_enables_fast_channels_1_and_2() {
     client
         .write_factrl(FaCtrl::default().with_fach1(true).with_fach2(true))
         .unwrap();
+}
+
+#[test]
+fn write_gpio_ctrl_emits_dcmd_to_fgpioctrl() {
+    // FGPIOCTRL has four 2-bit GPIO control fields. 0x03 sets GPIO1CTRL=0b11
+    // (drive GPIO1 high) and leaves GPIO2..GPIO4 at 0b00 (tristate).
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF2, &[0x03]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio_ctrl(0x03).unwrap();
+}
+
+#[test]
+fn write_occ_config_packs_fields_and_writes_both_channels() {
+    // OCCxCTRL layout: enable=bit0, threshold=bits[3:1],
+    // deglitch_time=bits[5:4], polarity=bits[7:6].
+
+    // Threshold selects a differential shunt-voltage limit, not a direct current.
+    // Current limit is V_threshold / R_shunt. For the repo's 100 uOhm example shunt:
+    //   threshold 0b011 = 78 mV -> 780 A
+    //   threshold 0b001 = 26 mV -> 260 A
+    // The second config is disabled, so its threshold is only a packing witness.
+    let config1 = OverCurrentConfig {
+        enable: true,
+        threshold: 0b011,
+        deglitch_time: 0b10,
+        polarity: 0b1,
+    };
+    let config2 = OverCurrentConfig {
+        enable: false,
+        threshold: 0b001,
+        deglitch_time: 0b01,
+        polarity: 0b0,
+    };
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xDE, &[0x67]));
+    expect_write(&mut mock, dcmd_write_bytes(0xDF, &[0x12]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_occ_config(config1, config2).unwrap();
 }
 
 #[test]
