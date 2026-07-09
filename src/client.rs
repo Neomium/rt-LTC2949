@@ -1,3 +1,56 @@
+//! # LTC2949 direct-register client.
+//!
+//! This module contains the high-level [`Client`] trait, the concrete [`LTC2949`] client,
+//! register-oriented configuration types, raw result readers, and helper constants for
+//! host-owned timing.
+//!
+//! ## Timing
+//!
+//! The driver never blocks. Operations with mandatory settling or acknowledge time are
+//! split into non-blocking phases: the first call starts the bus/device action and returns
+//! the number of microseconds the host must wait before issuing the next phase. This mirrors
+//! the `CommandTime` pattern used by the LTC681X cell-monitor client while keeping delay,
+//! timer, RTOS, or scheduler ownership in the application.
+//!
+//! Public timing constants are exposed so code can assert, schedule, or budget those waits
+//! explicitly:
+//!
+//! * [`T_BOOT_US`] is returned by [`Client::start_wake_up`] before
+//!   [`Client::confirm_wake_up`].
+//! * [`T_READY_US`] is returned by [`Client::wake_isospi`] before the next transaction.
+//! * [`T_MLCK_US`] is returned by [`Client::request_memory_lock`] before reading a coherent
+//!   locked snapshot.
+//!
+//! ```
+//! use embedded_hal::delay::DelayNs;
+//! use ltc2949::client::{Client, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US};
+//! use ltc2949::example::{ExampleDelay, ExampleSPIDevice};
+//!
+//! let spi = ExampleSPIDevice::default();
+//! let mut delay = ExampleDelay::default();
+//! let mut client = LTC2949::new(spi);
+//!
+//! let ready_us = client.wake_isospi().unwrap();
+//! assert_eq!(T_READY_US, ready_us);
+//! delay.delay_us(ready_us);
+//!
+//! let boot_us = client.start_wake_up().unwrap();
+//! assert_eq!(T_BOOT_US, boot_us);
+//! delay.delay_us(boot_us);
+//! client.confirm_wake_up().unwrap();
+//!
+//! let lock_us = client.request_memory_lock().unwrap();
+//! assert_eq!(T_MLCK_US, lock_us);
+//! delay.delay_us(lock_us);
+//! let _charge1 = client.read_charge1().unwrap();
+//! client.unlock_memory().unwrap();
+//!
+//! assert_eq!(
+//!     u64::from(T_READY_US) + u64::from(T_BOOT_US) + u64::from(T_MLCK_US),
+//!     delay.elapsed_us()
+//! );
+//! ```
+//!
 // `modular-bitfield`'s macro expansion emits `pub field: (bool)` etc., which trips the
 // `unused_parens` lint on newer rustc. Silence the lint module-wide.
 #![allow(unused_parens)]
@@ -7,14 +60,6 @@ use crate::polling::{NoPolling, PollMethod};
 use embedded_hal::spi::{Operation, SpiDevice};
 use heapless::Vec;
 use modular_bitfield::prelude::*;
-// ---------------------------------------------------------------------------
-// Timing constants (microseconds)
-//
-// The driver never blocks. Operations with a mandatory settling time are split into
-// non-blocking halves; the first half returns the wait the host must observe before
-// issuing the second, mirroring `CommandTime` on the cell-monitor client. The constants
-// are public so hosts can also schedule against them directly.
-// ---------------------------------------------------------------------------
 
 /// Worst-case core boot time from SLEEP/power-up to STANDBY (datasheet tBOOT).
 /// Returned by [`Client::start_wake_up`].
@@ -28,22 +73,15 @@ pub const T_READY_US: u32 = 20;
 /// STANDBY). Returned by [`Client::request_memory_lock`].
 pub const T_MLCK_US: u32 = 130_000;
 
-// ---------------------------------------------------------------------------
-// DCMD framing constants
-// ---------------------------------------------------------------------------
-
 /// Fixed PECC field (datasheet Table 12): 16 data bytes per PEC group.
 const PECC: u8 = 15;
+
 /// Max data bytes covered by one PEC group (`PECC + 1`).
 const N_PER_PEC: usize = 16;
+
 /// Whole 3-byte FIFO samples that fit one PEC group (`16 / 3 = 5`). Reading several samples
 /// per DCMD amortises the ~9-byte header/PEC overhead instead of paying it per sample.
 const FIFO_SAMPLES_PER_BURST: usize = N_PER_PEC / 3;
-
-// ---------------------------------------------------------------------------
-// Register map (only the entries we expose are named; full map is in the
-// datasheet, sections "Register Map PAGE0/PAGE1").
-// ---------------------------------------------------------------------------
 
 /// Memory page selector. PAGE0 holds measurement results, status and control;
 /// PAGE1 holds thresholds and configuration. Selected via the [`RegsCtrl`] register.
