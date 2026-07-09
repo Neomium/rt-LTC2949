@@ -198,8 +198,8 @@
 //! broadcast through the cell-monitor client puts exactly one `ADCV` on the bus, which the
 //! parallel LTC2949 also hears.
 //!
-//! ```ignore
-//! use ltc681x::ltc2949::{FaCtrl, Ltc2949Client, LTC2949, OpCtrl};
+//! ```
+//! use ltc2949::client::{FaCtrl, Client, LTC2949, OpCtrl};
 //! use ltc681x::ltc6813::{CellSelection, LTC6813};
 //! use ltc681x::monitor::{ADCMode, LTC681X, LTC681XClient};
 //!
