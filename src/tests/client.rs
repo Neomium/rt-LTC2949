@@ -14,8 +14,9 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, Client, FaCtrl, FifoTag, MuxInput, NtcConfig,
-    OpCtrl, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    float24_encode, float24_encode_high2, Accumulators, AdcConfiguration, Channel, Client, FastControlRegister,
+    FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US,
+    T_READY_US,
 };
 use crate::mocks::MockSPIDevice;
 use crate::pec15::PEC15;
@@ -250,10 +251,10 @@ fn wake_up_invalidates_page_cache() {
     expect_write(&mut mock, dcmd_write_bytes(0xDF, &[0x00]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::default()).unwrap();
+    client.write_adcconf(AdcConfiguration::default()).unwrap();
     client.start_wake_up().unwrap();
     client.confirm_wake_up().unwrap();
-    client.write_adcconf(AdcConf::default()).unwrap();
+    client.write_adcconf(AdcConfiguration::default()).unwrap();
 }
 
 #[test]
@@ -347,7 +348,7 @@ fn write_opctrl_cont_emits_dcmd_with_bit3_set() {
     expect_write(&mut mock, dcmd_write_bytes(0xF0, &[0x08]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_opctrl(OpCtrl::default().with_cont(true)).unwrap();
+    client.write_opctrl(OpsControlRegister::default().with_cont(true)).unwrap();
 }
 
 #[test]
@@ -358,7 +359,9 @@ fn write_opctrl_sleep_and_rst_emits_correct_byte() {
     expect_write(&mut mock, dcmd_write_bytes(0xF0, &[0x81]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_opctrl(OpCtrl::default().with_sleep(true).with_rst(true)).unwrap();
+    client
+        .write_opctrl(OpsControlRegister::default().with_sleep(true).with_rst(true))
+        .unwrap();
 }
 
 #[test]
@@ -370,7 +373,7 @@ fn write_factrl_enables_fast_channels_1_and_2() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client
-        .write_factrl(FaCtrl::default().with_fach1(true).with_fach2(true))
+        .write_factrl(FastControlRegister::default().with_fach1(true).with_fach2(true))
         .unwrap();
 }
 
@@ -426,7 +429,7 @@ fn write_adcconf_uses_page1_and_writes_to_0xdf() {
     expect_write(&mut mock, dcmd_write_bytes(0xDF, &[0x08]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::default().with_ntc1(true)).unwrap();
+    client.write_adcconf(AdcConfiguration::default().with_ntc1(true)).unwrap();
 }
 
 #[test]
@@ -439,8 +442,8 @@ fn write_opctrl_then_write_factrl_only_selects_page_once() {
     expect_write(&mut mock, dcmd_write_bytes(0xF5, &[0x01])); // FACTRL.FACONV
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_opctrl(OpCtrl::default().with_cont(true)).unwrap();
-    client.write_factrl(FaCtrl::default().with_faconv(true)).unwrap();
+    client.write_opctrl(OpsControlRegister::default().with_cont(true)).unwrap();
+    client.write_factrl(FastControlRegister::default().with_faconv(true)).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +587,7 @@ fn page1_write_then_page0_read_toggles_page_bit() {
     expect_dcmd_read(&mut mock, 0x80, &[0x00]);
 
     let mut client = LTC2949::new(mock);
-    client.write_adcconf(AdcConf::default().with_ntc1(true)).unwrap();
+    client.write_adcconf(AdcConfiguration::default().with_ntc1(true)).unwrap();
     let _ = client.read_status().unwrap();
 }
 

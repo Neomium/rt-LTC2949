@@ -84,7 +84,7 @@ const N_PER_PEC: usize = 16;
 const FIFO_SAMPLES_PER_BURST: usize = N_PER_PEC / 3;
 
 /// Memory page selector. PAGE0 holds measurement results, status and control;
-/// PAGE1 holds thresholds and configuration. Selected via the [`RegsCtrl`] register.
+/// PAGE1 holds thresholds and configuration. Selected via the [`RegControlRegister`] register.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Page {
     Page0 = 0,
@@ -191,25 +191,35 @@ impl Register for Page1Reg {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bit definitions
-// ---------------------------------------------------------------------------
-
 /// Operation Control register (PAGE0, 0xF0) — datasheet Table 24. `clr`, `sshot`, `adjupd`
 /// and `rst` are set-only; the device clears them once done (poll to observe completion).
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub struct OpCtrl {
+pub struct OpsControlRegister {
+    /// SLEEP: `0` = normal operation, `1` = enter SLEEP. The part exits SLEEP on CSB low
+    /// in SPI mode or the datasheet wake-up pulse sequence in isoSPI mode.
     pub sleep: bool,
+    /// CLR, set-only: clear accumulation and tracking registers, including charge, energy,
+    /// time-base, max/min measurement, temperature, VCC and SLOT tracking registers.
     pub clr: bool,
+    /// SSHOT, set-only: start one measurement set, update result registers, then return to
+    /// STANDBY. If CONT is set, the current conversion cycle completes first.
     pub sshot: bool,
+    /// CONT: enable continuous measurement. Charge, energy and time accumulation are active
+    /// only while continuous mode is enabled.
     pub cont: bool,
+    // Reserved bit 4. Write as 0.
     #[skip]
     __: B1,
+    /// ADJUPD, set-only: request an update of page-1 configuration registers except
+    /// thresholds. Issue in STANDBY; the device clears the bit when the update is done.
     pub adjupd: bool,
+    // Reserved bit 6. Write as 0.
     #[skip]
     __: B1,
+    /// RST, set-only: request software reset. The reset function is locked by default and
+    /// requires the RSTUNLCK sequence before this bit has an effect.
     pub rst: bool,
 }
 
@@ -217,11 +227,21 @@ pub struct OpCtrl {
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub struct FaCtrl {
+pub struct FastControlRegister {
+    /// FACONV: enable continuous fast conversions. When this is set and at least one of
+    /// `FACHA`, `FACH1` or `FACH2` is set, fast conversion results are written to the
+    /// corresponding FIFO.
     pub faconv: bool,
+    /// FACHA: include the auxiliary channel in fast mode. AUX fast conversions start after
+    /// a FACONV rising edge or when an ADCV-style command is issued.
     pub facha: bool,
+    /// FACH1: include channel 1 in fast mode. CH1 fast conversions start after a FACONV
+    /// rising edge or when an ADCV-style command is issued.
     pub fach1: bool,
+    /// FACH2: include channel 2 in fast mode. CH2 fast conversions start after a FACONV
+    /// rising edge or when an ADCV-style command is issued.
     pub fach2: bool,
+    // Reserved bits [7:4]. Write as 0.
     #[skip]
     __: B4,
 }
@@ -231,16 +251,29 @@ pub struct FaCtrl {
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub struct AdcConf {
+pub struct AdcConfiguration {
+    /// P1ASV: configure P1ADC as voltage instead of power. `0` = power mode,
+    /// `1` = voltage mode.
     pub p1asv: bool,
+    /// P2ASV: configure P2ADC as voltage instead of power. `0` = power mode,
+    /// `1` = voltage mode.
     pub p2asv: bool,
+    // Reserved bit 2. Write as 0.
     #[skip]
     __: B1,
+    /// NTC1: SLOT1 result mode. `0` = voltage measurement with 375 uV LSB,
+    /// `1` = NTC temperature measurement with 0.2 deg C LSB.
     pub ntc1: bool,
+    /// NTC2: SLOT2 result mode. `0` = voltage measurement with 375 uV LSB,
+    /// `1` = NTC temperature measurement with 0.2 deg C LSB.
     pub ntc2: bool,
+    // Reserved bit 5. Write as 0.
     #[skip]
     __: B1,
+    /// NTCSLOT1: shunt temperature-compensation source selection. `0` links I1 TC to
+    /// SLOT1 and I2 TC to SLOT2; `1` links both I1 and I2 TC compensation to SLOT1.
     pub ntcslot1: bool,
+    // Reserved bit 7. Write as 0.
     #[skip]
     __: B1,
 }
@@ -250,38 +283,49 @@ pub struct AdcConf {
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub struct RegsCtrl {
+pub struct RegControlRegister {
+    /// PAGE: active memory-map page. `0` selects PAGE0 result/control registers;
+    /// `1` selects PAGE1 threshold/configuration registers.
     pub page: bool,
+    // Reserved bit 1. Write as 0.
     #[skip]
     __: B1,
+    /// BCREN: broadcast read enable. Keep cleared in the parallel-to-daisy-chain topology
+    /// so the LTC2949 does not respond to broadcast reads and collide with cell monitors.
     pub bcren: bool,
+    // Reserved bit 3. Write as 0.
     #[skip]
     __: B1,
+    /// MLK\[1:0\]: memory-lock handshake. `0b00` = unlocked, `0b01` = lock requested by
+    /// master, `0b10` = memory locked/acknowledged by the LTC2949.
     pub mlk: B2,
+    // Reserved bit 6. Write as 0.
     #[skip]
     __: B1,
+    /// RDCVCONF: RDCV readout mode. `0` = indirect memory access from RDCVIADDR (0xFC);
+    /// `1` = RDCV reports the latest fast-channel conversion results.
     pub rdcvconf: bool,
 }
 
-impl Default for OpCtrl {
+impl Default for OpsControlRegister {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Default for FaCtrl {
+impl Default for FastControlRegister {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Default for AdcConf {
+impl Default for AdcConfiguration {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Default for RegsCtrl {
+impl Default for RegControlRegister {
     fn default() -> Self {
         Self::new()
     }
@@ -332,12 +376,20 @@ pub struct Accumulators {
     pub time: u32,
 }
 
-///Overcurrent Control Registers Table 50 & 51
+/// Overcurrent control register payload for OCC1CTRL/OCC2CTRL (datasheet Tables 50 & 51).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct OverCurrentConfig {
+    /// OCCEN: enables the overcurrent comparator for the channel.
     pub enable: bool,
+    /// OCCxDAC\[2:0\]: differential shunt-voltage threshold selector. Values map to
+    /// 0, 26, 52, 78, 103, 155, 207 and 310 mV; convert to current with
+    /// `I_limit = V_threshold / R_shunt`.
     pub threshold: u8,
+    /// OCCxDGL\[1:0\]: deglitch time selector. Values map to off, 80 us, 320 us and
+    /// 1280 us before the comparator event is accepted.
     pub deglitch_time: u8,
+    /// OCCxPOL\[1:0\]: comparator polarity selector. `0b00` checks both current directions;
+    /// `0b01` positive only; `0b10` negative only.
     pub polarity: u8,
 }
 
@@ -410,10 +462,6 @@ pub(crate) fn float24_encode_high2(value: f32) -> [u8; 2] {
     [b0, b1]
 }
 
-// ---------------------------------------------------------------------------
-// Sense-resistor temperature compensation
-// ---------------------------------------------------------------------------
-
 /// Sense-resistor temperature-drift compensation: `R(T) = R0·[1 + tc·(T-t_ref) + tc2·(T-t_ref)²]`,
 /// `T` being the linearised NTC reading. Copper ≈ `0.0039 /K`; low-TC alloys can stay uncompensated.
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -427,10 +475,6 @@ pub struct ShuntTcConfig {
     /// `0.0` to disable the quadratic term — fine for copper.
     pub tc2: f32,
 }
-
-// ---------------------------------------------------------------------------
-// Auxiliary multiplexer inputs (datasheet Table 57)
-// ---------------------------------------------------------------------------
 
 /// Inputs the AUX multiplexer can route to the SLOT pair (`MUXP`/`MUXN`) or the fast-mode
 /// `FAMUX` registers. Discriminants match the 5-bit encoding in datasheet Table 57.
@@ -503,23 +547,23 @@ pub trait Client {
     fn wake_isospi(&mut self) -> Result<u32, Self::Error>;
 
     /// Writes the Operation Control register (PAGE0, 0xF0).
-    fn write_opctrl(&mut self, value: OpCtrl) -> Result<(), Self::Error>;
+    fn write_opctrl(&mut self, value: OpsControlRegister) -> Result<(), Self::Error>;
 
     /// Reads the Operation Control register.
-    fn read_opctrl(&mut self) -> Result<OpCtrl, Self::Error>;
+    fn read_opctrl(&mut self) -> Result<OpsControlRegister, Self::Error>;
 
     /// Writes the Fast Control register (PAGE0, 0xF5).
-    fn write_factrl(&mut self, value: FaCtrl) -> Result<(), Self::Error>;
+    fn write_factrl(&mut self, value: FastControlRegister) -> Result<(), Self::Error>;
 
     /// Writes the ADC Configuration register (PAGE1, 0xDF). Takes effect only after an
     /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
-    fn write_adcconf(&mut self, value: AdcConf) -> Result<(), Self::Error>;
+    fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Self::Error>;
 
     /// Writes the Fast AUX mux selection (FAMUXP, FAMUXN).
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Self::Error>;
 
     /// Writes the Float24 Steinhart–Hart coefficients and reference resistor for an NTC
-    /// channel. Activate via [`write_slot_mux`](Self::write_slot_mux), [`AdcConf::ntc1`] and an ADJUPD pulse.
+    /// channel. Activate via [`write_slot_mux`](Self::write_slot_mux), [`AdcConfiguration::ntc1`] and an ADJUPD pulse.
     fn write_ntc_coefficients(&mut self, channel: Channel, params: &NtcConfig) -> Result<(), Self::Error>;
 
     /// Writes the sense-resistor temperature-compensation parameters for one channel. Active
@@ -664,8 +708,6 @@ where
 {
     type Error = Error<B>;
 
-    // -- High-level helpers ------------------------------------------------
-
     fn start_wake_up(&mut self) -> Result<u32, Error<B>> {
         // A reset / SLEEP clears the device's page selection — drop the cache so the next
         // access re-issues REGSCTRL rather than trusting a stale page.
@@ -692,21 +734,21 @@ where
         Ok(T_READY_US)
     }
 
-    fn write_opctrl(&mut self, value: OpCtrl) -> Result<(), Error<B>> {
+    fn write_opctrl(&mut self, value: OpsControlRegister) -> Result<(), Error<B>> {
         self.write_bytes(Page0Reg::OpCtrl, &value.into_bytes())
     }
 
-    fn read_opctrl(&mut self) -> Result<OpCtrl, Error<B>> {
+    fn read_opctrl(&mut self) -> Result<OpsControlRegister, Error<B>> {
         let mut buf = [0u8; 1];
         self.read_bytes(Page0Reg::OpCtrl, &mut buf)?;
-        Ok(OpCtrl::from_bytes(buf))
+        Ok(OpsControlRegister::from_bytes(buf))
     }
 
-    fn write_factrl(&mut self, value: FaCtrl) -> Result<(), Error<B>> {
+    fn write_factrl(&mut self, value: FastControlRegister) -> Result<(), Error<B>> {
         self.write_bytes(Page0Reg::FaCtrl, &value.into_bytes())
     }
 
-    fn write_adcconf(&mut self, value: AdcConf) -> Result<(), Error<B>> {
+    fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Error<B>> {
         self.write_bytes(Page1Reg::AdcConf, &value.into_bytes())
     }
 
@@ -817,14 +859,6 @@ where
         self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())
     }
 
-    // -- Measurement readouts ---------------------------------------------
-    //
-    // The non-accumulated results live in PAGE0. They are little-endian on the
-    // bus when read via direct memory access (which always returns MSB first
-    // per datasheet — "reading data from LTC2949's memory map reports MSBytes
-    // first, while reading fast conversion results via RDCV reports LSBytes
-    // first"). We therefore decode big-endian here.
-
     fn read_current1(&mut self) -> Result<i32, Error<B>> {
         self.read_signed_24(Page0Reg::Current1)
     }
@@ -860,8 +894,6 @@ where
     fn read_slot2(&mut self) -> Result<i16, Error<B>> {
         self.read_signed_16(Page0Reg::Slot2)
     }
-
-    // -- Accumulators ------------------------------------------------------
 
     fn read_charge1(&mut self) -> Result<i64, Error<B>> {
         self.read_signed_48(Page0Reg::Charge1)
@@ -910,8 +942,6 @@ where
     fn read_accumulators2(&mut self) -> Result<Accumulators, Error<B>> {
         self.read_accumulator_row(Page0Reg::Charge2)
     }
-
-    // -- Fast mode ---------------------------------------------------------
 
     fn trigger_adcv_broadcast(&mut self) -> Result<(), Error<B>> {
         // ADCV broadcast: CMD0=0b00000_010, CMD1=0b01100000 = 0x0260 (datasheet Table 17).
@@ -978,8 +1008,6 @@ where
         Ok(samples)
     }
 
-    // -- Decode helpers ---------------------------------------------------
-
     fn read_signed_16(&mut self, reg: Page0Reg) -> Result<i16, Error<B>> {
         let mut buf = [0u8; 2];
         self.read_bytes(reg, &mut buf)?;
@@ -1025,26 +1053,24 @@ where
         Ok(i64::from_be_bytes(buf))
     }
 
-    // -- Page handling ----------------------------------------------------
-
     /// REGSCTRL for the current page with RDCVCONF=1, BCREN=0, MLK=00. Lets the memory-lock
     /// helpers rewrite REGSCTRL without changing the selected page.
-    fn regsctrl_base(&self) -> RegsCtrl {
+    fn regsctrl_base(&self) -> RegControlRegister {
         let page1 = matches!(self.current_page.unwrap_or(Page::Page0), Page::Page1);
-        RegsCtrl::default().with_rdcvconf(true).with_page(page1)
+        RegControlRegister::default().with_rdcvconf(true).with_page(page1)
     }
 
     fn select_page(&mut self, page: Page) -> Result<(), Error<B>> {
         if self.current_page == Some(page) {
             return Ok(());
         }
-        let value = RegsCtrl::default().with_rdcvconf(true).with_page(matches!(page, Page::Page1));
+        let value = RegControlRegister::default()
+            .with_rdcvconf(true)
+            .with_page(matches!(page, Page::Page1));
         self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())?;
         self.current_page = Some(page);
         Ok(())
     }
-
-    // -- Read primitive ---------------------------------------------------
 
     /// Reads `buf.len()` bytes from `reg` via a direct `DCMD` read (no shift-register
     /// prefix in the parallel topology), selecting the page first if needed.
@@ -1153,8 +1179,6 @@ where
         self.poll_method.end_sync_command(&mut self.bus).map_err(Error::BusError)?;
         Ok(())
     }
-
-    // -- ADCV broadcast ---------------------------------------------------
 
     fn send_cmd16(&mut self, cmd: u16) -> Result<(), Error<B>> {
         let frame = build_cmd16(cmd);

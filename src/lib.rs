@@ -55,7 +55,7 @@
 //!
 //! ```
 //! use ltc2949::client::{
-//!     AdcConf, Channel, Client, FaCtrl, FifoTag, MuxInput, NtcConfig, OpCtrl, ShuntTcConfig,
+//!     AdcConfiguration, Channel, Client, FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, ShuntTcConfig,
 //!     LTC2949, T_BOOT_US,
 //! };
 //! use embedded_hal::delay::DelayNs;
@@ -112,7 +112,7 @@
 //!
 //! // ---- Step 3 – tell the AUX ADC to report SLOT1 as a temperature -----
 //! // NTC1 on, both power ADCs left in power-mode (P1ASV/P2ASV = 0).
-//! client.write_adcconf(AdcConf::default().with_ntc1(true))?;
+//! client.write_adcconf(AdcConfiguration::default().with_ntc1(true))?;
 //!
 //! // ---- Step 4 – route the NTC's V-pin into SLOT1 ----------------------
 //! // Typical wiring: VREF -- R_ref -- V1 -- NTC -- AGND. We read the V1 pin
@@ -124,12 +124,12 @@
 //! // ---- Step 5 – commit page-1 configuration (ADJUPD) ------------------
 //! // OPCTRL.ADJUPD is a set-only bit; the device clears it after ≤100 ms.
 //! // Poll OPCTRL.adjupd() == false to know when the update has landed.
-//! client.write_opctrl(OpCtrl::default().with_adjupd(true))?;
+//! client.write_opctrl(OpsControlRegister::default().with_adjupd(true))?;
 //! delay.delay_ms(100);
 //!
 //! // ---- Step 6 – enter continuous slow-mode measurement ----------------
 //! // ≈100 ms per cycle, 18-bit results. First update lands ~50 ms later.
-//! client.write_opctrl(OpCtrl::default().with_cont(true))?;
+//! client.write_opctrl(OpsControlRegister::default().with_cont(true))?;
 //! delay.delay_ms(100);
 //!
 //! // ---- Slow-mode reads ------------------------------------------------
@@ -158,13 +158,13 @@
 //! // ---- Fast measurements synchronised with the cell monitors ----------
 //! // Configure channels 1 and 2 for fast single-shot, then broadcast ADCV
 //! // so the LTC2949 and every LTC6813 trigger at the same instant.
-//! client.write_factrl(FaCtrl::default().with_fach1(true).with_fach2(true))?;
+//! client.write_factrl(FastControlRegister::default().with_fach1(true).with_fach2(true))?;
 //! client.trigger_adcv_broadcast()?;
 //! delay.delay_us(800);
 //!
 //! // Fast continuous: set FACONV=1 and drain the FIFO periodically.
 //! client.write_factrl(
-//!     FaCtrl::default().with_faconv(true).with_fach1(true).with_fach2(true),
+//!     FastControlRegister::default().with_faconv(true).with_fach1(true).with_fach2(true),
 //! )?;
 //! delay.delay_us(1_260);
 //! assert_eq!(302_060, delay.elapsed_us());
@@ -173,9 +173,9 @@
 //! let samples = client.read_fifo_i1::<32>()?;
 //! for s in &samples {
 //!     // 16-bit signed, LSB = 7.60371 µV across the shunt.
-//!     let _uv = (s.raw as i32 * 760_371) / 100_000;
+//!     let uv = (s.raw as i32 * 760_371) / 100_000;
 //!     if s.tag == FifoTag::Ok {
-//!         assert_eq!(1_946, _uv);
+//!         assert_eq!(1_946, uv);
 //!     }
 //! }
 //! # Ok(())
@@ -199,7 +199,7 @@
 //! parallel LTC2949 also hears.
 //!
 //! ```
-//! use ltc2949::client::{FaCtrl, Client, LTC2949, OpCtrl};
+//! use ltc2949::client::{FastControlRegister, Client, LTC2949, OpsControlRegister};
 //! use ltc681x::ltc6813::{CellSelection, LTC6813};
 //! use ltc681x::monitor::{ADCMode, LTC681X, LTC681XClient};
 //!
@@ -223,8 +223,8 @@
 //! let boot_us = meter.start_wake_up().map_err(|_| ())?;
 //! // ... host waits `boot_us` microseconds ...
 //! meter.confirm_wake_up().map_err(|_| ())?;
-//! meter.write_opctrl(OpCtrl::default().with_cont(true)).map_err(|_| ())?; // CONT prereq
-//! meter.write_factrl(FaCtrl::default().with_fach2(true)).map_err(|_| ())?; // CH2 fast
+//! meter.write_opctrl(OpsControlRegister::default().with_cont(true)).map_err(|_| ())?; // CONT prereq
+//! meter.write_factrl(FastControlRegister::default().with_fach2(true)).map_err(|_| ())?; // CH2 fast
 //!
 //! // ---- One broadcast ADCV → both devices convert at the same instant ----------
 //! // start_conv_cells emits a *broadcast* ADCV (A/B address bits = 0), so it reaches
