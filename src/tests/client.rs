@@ -474,7 +474,10 @@ fn read_uses_dcmd_read_frame_with_read_id() {
     expect_transfer(&mut mock, tx, rx);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(0xA5, client.read_status().unwrap());
+    let status = client.read_status().unwrap();
+    assert!(status.sleep());
+    assert!(status.measure());
+    assert!(status.fam());
 }
 
 #[test]
@@ -493,13 +496,20 @@ fn read_opctrl_decodes_bitfield() {
 }
 
 #[test]
-fn read_status_returns_raw_byte() {
+fn read_status_decodes_bitfield() {
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
-    expect_dcmd_read(&mut mock, 0x80, &[0xA5]);
+    expect_dcmd_read(&mut mock, 0x80, &[0x7F]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(0xA5, client.read_status().unwrap());
+    let status = client.read_status().unwrap();
+    assert!(status.sleep());
+    assert!(status.standby());
+    assert!(status.measure());
+    assert!(status.faupd());
+    assert!(status.tberr());
+    assert!(status.fam());
+    assert!(status.faults());
 }
 
 #[test]

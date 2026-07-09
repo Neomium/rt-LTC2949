@@ -36,7 +36,8 @@
 //! * Slow-mode result registers (`I1`, `I2`, `P1`, `P2`, `BAT`, `TEMP`, `VCC`, `SLOT1/2`).
 //! * Accumulators (charge `C1..C3`, energy `E1/E2/E4`, time `TB1..TB4`), plus the
 //!   memory-lock handshake for coherent multi-register snapshots.
-//! * Fault status (`STATUS`, `FAULTS`, `EXTFAULTS`) as raw bytes.
+//! * Status/fault registers (`STATUS`, `FAULTS`, `EXTFAULTS`); `STATUS` is decoded,
+//!   fault registers are exposed as raw bytes.
 //! * Fast mode trigger (`FACTRL`, broadcast `ADCV`) and FIFO drain.
 //! * Steinhart–Hart linearisation coefficients for the two NTC channels
 //!   ([`client::Client::write_ntc_coefficients`]), including the `f32 → Float24` encoding.

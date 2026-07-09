@@ -332,6 +332,30 @@ impl Default for RegControlRegister {
     }
 }
 
+/// Status register (PAGE0, 0x80; datasheet Table 26).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct StatusRegister {
+    /// SLEEP: the core is in SLEEP mode.
+    pub sleep: bool,
+    /// STANDBY: the core is in STANDBY mode.
+    pub standby: bool,
+    /// MEASURE: the core is in MEASURE mode.
+    pub measure: bool,
+    /// FAUPD: fast-channel result update indicator.
+    pub faupd: bool,
+    /// TBERR: time-base error indicator.
+    pub tberr: bool,
+    /// FAM: fast-acquisition mode indicator.
+    pub fam: bool,
+    /// FAULTS: one or more fault bits are set in `FAULTS`/`EXTFAULTS`.
+    pub faults: bool,
+    // Reserved bit 7.
+    #[skip]
+    __: B1,
+}
+
 /// FIFO sample tag values (datasheet Table 30).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum FifoTag {
@@ -531,10 +555,12 @@ pub trait Client {
     /// Writes GPIO Control
     fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error>;
 
+    /// Writes both overcurrent-comparator control registers (`OCC1CTRL`/`OCC2CTRL`) in
+    /// one PAGE0 burst. `config1` applies to channel 1; `config2` applies to channel 2.
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error>;
 
-    /// Reads the STATUS register (raw byte, datasheet Table 26).
-    fn read_status(&mut self) -> Result<u8, Self::Error>;
+    /// Reads and decodes the STATUS register (PAGE0, 0x80; datasheet Table 26).
+    fn read_status(&mut self) -> Result<StatusRegister, Self::Error>;
 
     /// Reads the FAULTS register (raw byte, datasheet 0xDD; UVLO/POR/self-test bits). No
     /// typed bitfield yet — consult the datasheet for the bit map.
@@ -771,10 +797,10 @@ where
         self.write_bytes(RegAddressP0::Occ2Ctrl, &[b2])
     }
 
-    fn read_status(&mut self) -> Result<u8, Error<B>> {
+    fn read_status(&mut self) -> Result<StatusRegister, Error<B>> {
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::Status, &mut buf)?;
-        Ok(buf[0])
+        Ok(StatusRegister::from_bytes(buf))
     }
 
     fn read_faults(&mut self) -> Result<u8, Error<B>> {
