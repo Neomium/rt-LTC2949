@@ -14,8 +14,8 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, FaCtrl, FifoTag, Client, MuxInput,
-    NtcConfig, OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, Client, FaCtrl, FifoTag, MuxInput, NtcConfig,
+    OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::mocks::MockSPIDevice;
 use crate::pec15::PEC15;

@@ -973,10 +973,13 @@ where
     }
 
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
-        let b = config1.enable as u8 + config1.threshold << 1 + config1.deglitch_time << 4 + config1.polarity << 6;
+        let b =
+            (config1.enable as u8) | (config1.threshold << 1) | (config1.deglitch_time << 4) | (config1.polarity << 6);
         self.write_bytes(Page0Reg::Occ1Ctrl, &[b])?;
-        let b2 = config2.enable as u8 + config2.threshold << 1 + config2.deglitch_time << 4 + config2.polarity << 6;
-        self.write_bytes(Page0Reg::Occ1Ctrl, &[b2])
+
+        let b2 =
+            (config2.enable as u8) | (config2.threshold << 1) | (config2.deglitch_time << 4) | (config2.polarity << 6);
+        self.write_bytes(Page0Reg::Occ2Ctrl, &[b2])
     }
 
     fn read_status(&mut self) -> Result<u8, Error<B>> {
