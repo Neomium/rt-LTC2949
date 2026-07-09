@@ -1,28 +1,29 @@
 [package]
-name = "ltc681x"
-description = "Client LTC681X battery monitoring family"
-keywords = ["LTC681X", "BMS", "no_std", "battery", "ic"]
+name = "ltc2949"
+description = "Client for the battery pack monitor chip LTC2949"
+keywords = ["LTC2949", "BMS", "no_std", "battery", "ic"]
 categories  = ["embedded", "hardware-support", "no-std"]
-authors = ["PEGASUS GmbH <info@pegasus-aero.de>"]
+authors = ["Neomium GmbH <info@neomium.de>"]
 license = "MIT OR Apache-2.0"
-version = "0.6.2"
+version = "0.1.0"
 edition = "2021"
-repository = "https://github.com/pegasus-aero/rt-LTC681X"
+repository = "https://github.com/neomium/rt-LTC2949"
 readme = "README.md"
-documentation = "https://docs.rs/ltc681x"
+documentation = "https://docs.rs/ltc2949"
 
 [dependencies]
 embedded-hal = "1.0.0"
 heapless = "0.8.0"
 fixed = "1.15.0"
 modular-bitfield = "0.11.2"
+ltc681x = {optional = true, version = "0.6.2"}
 
 [dev-dependencies]
 mockall = "0.11.0"
 
 [features]
 default = ["example"]
-# Mocks for doc examples
-example = []
+# Mocks and dependencies for doc examples
+example = ["ltc681x"]
 # Fail on warnings
 strict = []
