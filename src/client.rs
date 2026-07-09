@@ -230,6 +230,127 @@ impl AveragedCurrentSenseVoltage {
     }
 }
 
+/// Raw P1/P2 result.
+///
+/// P1/P2 contain power results by default, or voltage results when `P1ASV`/`P2ASV` is set
+/// in [`AdcConfiguration`].
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct PowerOrVoltage {
+    raw: i32,
+}
+
+impl PowerOrVoltage {
+    /// Power-mode scale before applying the external shunt resistance.
+    pub const POWER_LSB_VOLT_SQUARED: f32 = 5.8368e-12;
+    /// Voltage-mode scale represented by one raw ADC code.
+    pub const VOLTAGE_LSB_VOLTS: f32 = 46.875e-6;
+
+    /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub const fn from_raw(raw: i32) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 24-bit ADC code, sign-extended to `i32`.
+    pub fn raw(self) -> i32 {
+        self.raw
+    }
+
+    /// Decodes a power-mode P1/P2 result into watts.
+    pub fn decode_power(self, shunt_ohms: f32) -> f32 {
+        self.raw as f32 * Self::POWER_LSB_VOLT_SQUARED / shunt_ohms
+    }
+
+    /// Decodes a voltage-mode P1/P2 result into volts.
+    pub fn decode_voltage(self) -> f32 {
+        self.raw as f32 * Self::VOLTAGE_LSB_VOLTS
+    }
+}
+
+/// Raw BAT battery-voltage result.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct BatteryVoltage {
+    raw: i16,
+}
+
+impl BatteryVoltage {
+    /// Voltage represented by one raw ADC code.
+    pub const LSB_VOLTS: f32 = 375e-6;
+
+    /// Wraps a raw signed 16-bit ADC code.
+    pub const fn from_raw(raw: i16) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 16-bit ADC code.
+    pub fn raw(self) -> i16 {
+        self.raw
+    }
+
+    /// Decodes the raw ADC code into battery voltage in volts.
+    pub fn decode(self) -> f32 {
+        self.raw as f32 * Self::LSB_VOLTS
+    }
+}
+
+/// Raw internal die-temperature result.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct DieTemperature {
+    raw: i16,
+}
+
+impl DieTemperature {
+    /// Temperature represented by one raw ADC code.
+    pub const LSB_KELVIN: f32 = 0.2;
+    /// Offset between the kelvin and Celsius temperature scales.
+    pub const ZERO_CELSIUS_KELVIN: f32 = 273.15;
+
+    /// Wraps a raw signed 16-bit ADC code.
+    pub const fn from_raw(raw: i16) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 16-bit ADC code.
+    pub fn raw(self) -> i16 {
+        self.raw
+    }
+
+    /// Decodes the raw ADC code into absolute temperature in kelvin.
+    pub fn decode_kelvin(self) -> f32 {
+        self.raw as f32 * Self::LSB_KELVIN
+    }
+
+    /// Decodes the raw ADC code into temperature in degrees Celsius.
+    pub fn decode_celsius(self) -> f32 {
+        self.decode_kelvin() - Self::ZERO_CELSIUS_KELVIN
+    }
+}
+
+/// Raw A/DVCC supply-voltage result.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct SupplyVoltage {
+    raw: i16,
+}
+
+impl SupplyVoltage {
+    /// Voltage represented by one raw ADC code.
+    pub const LSB_VOLTS: f32 = 2.26e-3;
+
+    /// Wraps a raw signed 16-bit ADC code.
+    pub const fn from_raw(raw: i16) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 16-bit ADC code.
+    pub fn raw(self) -> i16 {
+        self.raw
+    }
+
+    /// Decodes the raw ADC code into supply voltage in volts.
+    pub fn decode(self) -> f32 {
+        self.raw as f32 * Self::LSB_VOLTS
+    }
+}
+
 /// A device register resolving to a memory [`Page`] and an on-bus address byte, so the
 /// framing helpers take a register and derive the page rather than threading both.
 trait Register: Copy {
@@ -698,19 +819,20 @@ pub trait Client {
 
     /// Reads P1 (power 1 or voltage if P1ASV is set). LSB = 5.8368 µV²/Ω (power) or
     /// 46.875 µV (voltage).
-    fn read_power1(&mut self) -> Result<i32, Self::Error>;
+    fn read_power1(&mut self) -> Result<PowerOrVoltage, Self::Error>;
 
-    /// Reads P2 (power 2 or voltage if P2ASV is set).
-    fn read_power2(&mut self) -> Result<i32, Self::Error>;
+    /// Reads P2 (power 2 or voltage if P2ASV is set). LSB = 5.8368 µV²/Ω (power) or
+    /// 46.875 µV (voltage).
+    fn read_power2(&mut self) -> Result<PowerOrVoltage, Self::Error>;
 
     /// Reads BAT (battery voltage). LSB = 375 µV.
-    fn read_bat(&mut self) -> Result<i16, Self::Error>;
+    fn read_bat(&mut self) -> Result<BatteryVoltage, Self::Error>;
 
     /// Reads internal die temperature. LSB = 0.2 °C, full-scale 819.2 K.
-    fn read_temp(&mut self) -> Result<i16, Self::Error>;
+    fn read_temp(&mut self) -> Result<DieTemperature, Self::Error>;
 
     /// Reads A/DVCC supply voltage. LSB = 2.26 mV.
-    fn read_vcc(&mut self) -> Result<i16, Self::Error>;
+    fn read_vcc(&mut self) -> Result<SupplyVoltage, Self::Error>;
 
     /// Reads SLOT1 — voltage (375 µV/LSB) or temperature (0.2 °C/LSB) depending on NTC1
     /// in ADCCONF.
@@ -970,24 +1092,24 @@ where
             .map(AveragedCurrentSenseVoltage::from_raw)
     }
 
-    fn read_power1(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(RegAddressP0::Power1)
+    fn read_power1(&mut self) -> Result<PowerOrVoltage, Error<B>> {
+        self.read_signed_24(RegAddressP0::Power1).map(PowerOrVoltage::from_raw)
     }
 
-    fn read_power2(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(RegAddressP0::Power2)
+    fn read_power2(&mut self) -> Result<PowerOrVoltage, Error<B>> {
+        self.read_signed_24(RegAddressP0::Power2).map(PowerOrVoltage::from_raw)
     }
 
-    fn read_bat(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(RegAddressP0::Bat)
+    fn read_bat(&mut self) -> Result<BatteryVoltage, Error<B>> {
+        self.read_signed_16(RegAddressP0::Bat).map(BatteryVoltage::from_raw)
     }
 
-    fn read_temp(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(RegAddressP0::Temp)
+    fn read_temp(&mut self) -> Result<DieTemperature, Error<B>> {
+        self.read_signed_16(RegAddressP0::Temp).map(DieTemperature::from_raw)
     }
 
-    fn read_vcc(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(RegAddressP0::Vcc)
+    fn read_vcc(&mut self) -> Result<SupplyVoltage, Error<B>> {
+        self.read_signed_16(RegAddressP0::Vcc).map(SupplyVoltage::from_raw)
     }
 
     fn read_slot1(&mut self) -> Result<i16, Error<B>> {

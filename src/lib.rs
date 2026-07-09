@@ -139,8 +139,8 @@
 //! let v_shunt_uv = (i1.decode() * 1_000_000.0) as i32;
 //! // For a 100 µΩ shunt: current_uA = v_shunt_uv * 10
 //!
-//! let bat_raw = client.read_bat()?;           // i16, LSB = 375 µV pin-to-pin
-//! let bat_uv  = bat_raw as i32 * 375;
+//! let bat = client.read_bat()?;               // BatteryVoltage
+//! let bat_uv  = (bat.decode() * 1_000_000.0) as i32;
 //! assert_eq!(4_629_375, bat_uv);
 //!
 //! let slot1_raw = client.read_slot1()?;       // i16, LSB = 0.2 °C (NTC mode)

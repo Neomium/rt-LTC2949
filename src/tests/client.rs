@@ -553,6 +553,32 @@ fn read_current2_avg_decodes_24bit_signed_be() {
 }
 
 #[test]
+fn read_power1_decodes_power_or_voltage_value() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0x93, &[0x00, 0x01, 0x00]);
+
+    let mut client = LTC2949::new(mock);
+    let result = client.read_power1().unwrap();
+    assert_eq!(0x000100, result.raw());
+    assert!((result.decode_voltage() - 0.012).abs() < f32::EPSILON);
+    assert!((result.decode_power(0.0001) - 0.000014942208).abs() < f32::EPSILON);
+}
+
+#[test]
+fn read_power2_decodes_24bit_signed_be() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0x99, &[0xFF, 0xFF, 0xFF]);
+
+    let mut client = LTC2949::new(mock);
+    let result = client.read_power2().unwrap();
+    assert_eq!(-1, result.raw());
+    assert!((result.decode_voltage() - -46.875e-6).abs() < f32::EPSILON);
+    assert!((result.decode_power(1.0) - -5.8368e-12).abs() < f32::EPSILON);
+}
+
+#[test]
 fn read_bat_decodes_16bit_signed_be() {
     // 0x7FFF = 32767 (max positive).
     let mut mock = MockSPIDevice::new();
@@ -560,7 +586,34 @@ fn read_bat_decodes_16bit_signed_be() {
     expect_dcmd_read(&mut mock, 0xA0, &[0x7F, 0xFF]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(32767, client.read_bat().unwrap());
+    let bat = client.read_bat().unwrap();
+    assert_eq!(32767, bat.raw());
+    assert!((bat.decode() - 12.287625).abs() < f32::EPSILON);
+}
+
+#[test]
+fn read_temp_decodes_kelvin_and_celsius() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xA2, &[0x05, 0xD4]);
+
+    let mut client = LTC2949::new(mock);
+    let temp = client.read_temp().unwrap();
+    assert_eq!(1492, temp.raw());
+    assert!((temp.decode_kelvin() - 298.4).abs() < f32::EPSILON);
+    assert!((temp.decode_celsius() - 25.25).abs() < f32::EPSILON);
+}
+
+#[test]
+fn read_vcc_decodes_supply_voltage() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xA4, &[0x03, 0xE8]);
+
+    let mut client = LTC2949::new(mock);
+    let vcc = client.read_vcc().unwrap();
+    assert_eq!(1000, vcc.raw());
+    assert!((vcc.decode() - 2.26).abs() < f32::EPSILON);
 }
 
 #[test]
