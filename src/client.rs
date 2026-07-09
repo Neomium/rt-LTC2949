@@ -95,7 +95,7 @@ pub enum Page {
 /// registers (datasheet Tables 24, 26-28, 57-64). Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub enum Page0Reg {
+pub enum RegAddressP0 {
     Charge1 = 0x00, // 48-bit
     Energy1 = 0x06, // 48-bit
     Time1 = 0x0C,   // 32-bit
@@ -146,7 +146,7 @@ pub enum Page0Reg {
 /// TC coefficient blocks (datasheet Tables 69, 71, 76). Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
-pub enum Page1Reg {
+pub enum RegAddressP1 {
     // 2nd-order sense-resistor TC (3 bytes Float24 each), tucked low on the page.
     Rs1Tc2 = 0x5C,
     Rs2Tc2 = 0x7C,
@@ -177,14 +177,14 @@ trait Register: Copy {
     fn addr(self) -> u8;
 }
 
-impl Register for Page0Reg {
+impl Register for RegAddressP0 {
     const PAGE: Page = Page::Page0;
     fn addr(self) -> u8 {
         self as u8
     }
 }
 
-impl Register for Page1Reg {
+impl Register for RegAddressP1 {
     const PAGE: Page = Page::Page1;
     fn addr(self) -> u8 {
         self as u8
@@ -392,10 +392,6 @@ pub struct OverCurrentConfig {
     /// `0b01` positive only; `0b10` negative only.
     pub polarity: u8,
 }
-
-// ---------------------------------------------------------------------------
-// NTC linearisation
-// ---------------------------------------------------------------------------
 
 /// One of the two LTC2949 measurement channels — each pairs a current/power ADC, a SLOT,
 /// an NTC lineariser and a sense-resistor TC entry (suffix 1 vs. 2).
@@ -724,7 +720,7 @@ where
 
     fn confirm_wake_up(&mut self) -> Result<(), Error<B>> {
         // Confirm wake-up by writing 0x00 to WKUPACK (within tACKN = 1 s of STANDBY).
-        self.write_bytes(Page0Reg::WkupAck, &[0x00])
+        self.write_bytes(RegAddressP0::WkupAck, &[0x00])
     }
 
     fn wake_isospi(&mut self) -> Result<u32, Error<B>> {
@@ -735,31 +731,31 @@ where
     }
 
     fn write_opctrl(&mut self, value: OpsControlRegister) -> Result<(), Error<B>> {
-        self.write_bytes(Page0Reg::OpCtrl, &value.into_bytes())
+        self.write_bytes(RegAddressP0::OpCtrl, &value.into_bytes())
     }
 
     fn read_opctrl(&mut self) -> Result<OpsControlRegister, Error<B>> {
         let mut buf = [0u8; 1];
-        self.read_bytes(Page0Reg::OpCtrl, &mut buf)?;
+        self.read_bytes(RegAddressP0::OpCtrl, &mut buf)?;
         Ok(OpsControlRegister::from_bytes(buf))
     }
 
     fn write_factrl(&mut self, value: FastControlRegister) -> Result<(), Error<B>> {
-        self.write_bytes(Page0Reg::FaCtrl, &value.into_bytes())
+        self.write_bytes(RegAddressP0::FaCtrl, &value.into_bytes())
     }
 
     fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Error<B>> {
-        self.write_bytes(Page1Reg::AdcConf, &value.into_bytes())
+        self.write_bytes(RegAddressP1::AdcConf, &value.into_bytes())
     }
 
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Error<B>> {
-        self.write_bytes(Page0Reg::FaMuxN, &[mux_n, mux_p])
+        self.write_bytes(RegAddressP0::FaMuxN, &[mux_n, mux_p])
     }
 
     fn write_ntc_coefficients(&mut self, channel: Channel, params: &NtcConfig) -> Result<(), Error<B>> {
         let (rref_addr, abc_addr) = match channel {
-            Channel::One => (Page1Reg::Rref1, Page1Reg::Ntc1A),
-            Channel::Two => (Page1Reg::Rref2, Page1Reg::Ntc2A),
+            Channel::One => (RegAddressP1::Rref1, RegAddressP1::Ntc1A),
+            Channel::Two => (RegAddressP1::Rref2, RegAddressP1::Ntc2A),
         };
 
         let rref = float24_encode(params.r_ref);
@@ -776,8 +772,8 @@ where
 
     fn write_shunt_tc(&mut self, channel: Channel, config: &ShuntTcConfig) -> Result<(), Error<B>> {
         let (tc_addr, tc2_addr) = match channel {
-            Channel::One => (Page1Reg::Rs1Tc, Page1Reg::Rs1Tc2),
-            Channel::Two => (Page1Reg::Rs2Tc, Page1Reg::Rs2Tc2),
+            Channel::One => (RegAddressP1::Rs1Tc, RegAddressP1::Rs1Tc2),
+            Channel::Two => (RegAddressP1::Rs2Tc, RegAddressP1::Rs2Tc2),
         };
 
         // RSnTC (3 bytes Float24) + RSnT0 (2 bytes truncated Float24).
@@ -795,8 +791,8 @@ where
 
     fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Error<B>> {
         let addr_n = match slot {
-            Channel::One => Page0Reg::Slot1MuxN,
-            Channel::Two => Page0Reg::Slot2MuxN,
+            Channel::One => RegAddressP0::Slot1MuxN,
+            Channel::Two => RegAddressP0::Slot2MuxN,
         };
         // MUXN and MUXP are adjacent (0xEB/0xEC for SLOT1, 0xED/0xEE for SLOT2)
         // so a single 2-byte burst configures both.
@@ -804,34 +800,34 @@ where
     }
 
     fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
-        self.write_bytes(Page0Reg::FGpioCtrl, &[gpio])
+        self.write_bytes(RegAddressP0::FGpioCtrl, &[gpio])
     }
 
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
         let b =
             (config1.enable as u8) | (config1.threshold << 1) | (config1.deglitch_time << 4) | (config1.polarity << 6);
-        self.write_bytes(Page0Reg::Occ1Ctrl, &[b])?;
+        self.write_bytes(RegAddressP0::Occ1Ctrl, &[b])?;
 
         let b2 =
             (config2.enable as u8) | (config2.threshold << 1) | (config2.deglitch_time << 4) | (config2.polarity << 6);
-        self.write_bytes(Page0Reg::Occ2Ctrl, &[b2])
+        self.write_bytes(RegAddressP0::Occ2Ctrl, &[b2])
     }
 
     fn read_status(&mut self) -> Result<u8, Error<B>> {
         let mut buf = [0u8; 1];
-        self.read_bytes(Page0Reg::Status, &mut buf)?;
+        self.read_bytes(RegAddressP0::Status, &mut buf)?;
         Ok(buf[0])
     }
 
     fn read_faults(&mut self) -> Result<u8, Error<B>> {
         let mut buf = [0u8; 1];
-        self.read_bytes(Page0Reg::Faults, &mut buf)?;
+        self.read_bytes(RegAddressP0::Faults, &mut buf)?;
         Ok(buf[0])
     }
 
     fn read_extfaults(&mut self) -> Result<u8, Error<B>> {
         let mut buf = [0u8; 1];
-        self.read_bytes(Page0Reg::ExtFaults, &mut buf)?;
+        self.read_bytes(RegAddressP0::ExtFaults, &mut buf)?;
         Ok(buf[0])
     }
 
@@ -842,7 +838,7 @@ where
         // does not also switch pages. MLK = 0b01.
         let page = self.current_page.unwrap_or(Page::Page0);
         let value = self.regsctrl_base().with_mlk(0b01);
-        self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())?;
+        self.dcmd_write(RegAddressP0::RegsCtrl.addr(), &value.into_bytes())?;
         // The lock request also pins the page. Record it so that same-page reads inside the
         // lock are cache hits and do not rewrite REGSCTRL — which would clear MLK and
         // release the lock. (This is why the caller must stay on one page while locked.)
@@ -856,91 +852,91 @@ where
     fn unlock_memory(&mut self) -> Result<(), Error<B>> {
         // MLK back to 0b00, same page preserved.
         let value = self.regsctrl_base();
-        self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())
+        self.dcmd_write(RegAddressP0::RegsCtrl.addr(), &value.into_bytes())
     }
 
     fn read_current1(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(Page0Reg::Current1)
+        self.read_signed_24(RegAddressP0::Current1)
     }
 
     fn read_current2(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(Page0Reg::Current2)
+        self.read_signed_24(RegAddressP0::Current2)
     }
 
     fn read_power1(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(Page0Reg::Power1)
+        self.read_signed_24(RegAddressP0::Power1)
     }
 
     fn read_power2(&mut self) -> Result<i32, Error<B>> {
-        self.read_signed_24(Page0Reg::Power2)
+        self.read_signed_24(RegAddressP0::Power2)
     }
 
     fn read_bat(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(Page0Reg::Bat)
+        self.read_signed_16(RegAddressP0::Bat)
     }
 
     fn read_temp(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(Page0Reg::Temp)
+        self.read_signed_16(RegAddressP0::Temp)
     }
 
     fn read_vcc(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(Page0Reg::Vcc)
+        self.read_signed_16(RegAddressP0::Vcc)
     }
 
     fn read_slot1(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(Page0Reg::Slot1)
+        self.read_signed_16(RegAddressP0::Slot1)
     }
 
     fn read_slot2(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(Page0Reg::Slot2)
+        self.read_signed_16(RegAddressP0::Slot2)
     }
 
     fn read_charge1(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(Page0Reg::Charge1)
+        self.read_signed_48(RegAddressP0::Charge1)
     }
 
     fn read_charge2(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(Page0Reg::Charge2)
+        self.read_signed_48(RegAddressP0::Charge2)
     }
 
     fn read_charge3(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_64(Page0Reg::Charge3)
+        self.read_signed_64(RegAddressP0::Charge3)
     }
 
     fn read_energy1(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(Page0Reg::Energy1)
+        self.read_signed_48(RegAddressP0::Energy1)
     }
 
     fn read_energy2(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(Page0Reg::Energy2)
+        self.read_signed_48(RegAddressP0::Energy2)
     }
 
     fn read_energy4(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_64(Page0Reg::Energy4)
+        self.read_signed_64(RegAddressP0::Energy4)
     }
 
     fn read_time1(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(Page0Reg::Time1)
+        self.read_unsigned_32(RegAddressP0::Time1)
     }
 
     fn read_time2(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(Page0Reg::Time2)
+        self.read_unsigned_32(RegAddressP0::Time2)
     }
 
     fn read_time3(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(Page0Reg::Time3)
+        self.read_unsigned_32(RegAddressP0::Time3)
     }
 
     fn read_time4(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(Page0Reg::Time4)
+        self.read_unsigned_32(RegAddressP0::Time4)
     }
 
     fn read_accumulators1(&mut self) -> Result<Accumulators, Error<B>> {
-        self.read_accumulator_row(Page0Reg::Charge1)
+        self.read_accumulator_row(RegAddressP0::Charge1)
     }
 
     fn read_accumulators2(&mut self) -> Result<Accumulators, Error<B>> {
-        self.read_accumulator_row(Page0Reg::Charge2)
+        self.read_accumulator_row(RegAddressP0::Charge2)
     }
 
     fn trigger_adcv_broadcast(&mut self) -> Result<(), Error<B>> {
@@ -965,25 +961,25 @@ where
     /// Drains up to `N` I1 FIFO samples (3 bytes each: MSB, LSB, TAG). Stops at the first
     /// non-`Ok` sample, which is included as the terminator so the caller can read its `tag`.
     pub fn read_fifo_i1<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
-        self.read_fifo::<N>(Page0Reg::FifoI1)
+        self.read_fifo::<N>(RegAddressP0::FifoI1)
     }
 
     /// Drains up to `N` samples from the I2 FIFO.
     pub fn read_fifo_i2<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
-        self.read_fifo::<N>(Page0Reg::FifoI2)
+        self.read_fifo::<N>(RegAddressP0::FifoI2)
     }
 
     /// Drains up to `N` samples from the BAT (P1/P2 voltage-mode) FIFO.
     pub fn read_fifo_bat<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
-        self.read_fifo::<N>(Page0Reg::FifoBat)
+        self.read_fifo::<N>(RegAddressP0::FifoBat)
     }
 
     /// Drains up to `N` samples from the AUX FIFO.
     pub fn read_fifo_aux<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
-        self.read_fifo::<N>(Page0Reg::FifoAux)
+        self.read_fifo::<N>(RegAddressP0::FifoAux)
     }
 
-    fn read_fifo<const N: usize>(&mut self, reg: Page0Reg) -> Result<Vec<FifoSample, N>, Error<B>> {
+    fn read_fifo<const N: usize>(&mut self, reg: RegAddressP0) -> Result<Vec<FifoSample, N>, Error<B>> {
         // The FIFO register is non-incrementing: each 3-byte group within a burst pops the
         // next sample (datasheet "Reading the FIFOs"), so one DCMD read of 3·k bytes yields
         // k samples. Drain in bursts and stop at the first non-`Ok` tag (kept as terminator).
@@ -1008,13 +1004,13 @@ where
         Ok(samples)
     }
 
-    fn read_signed_16(&mut self, reg: Page0Reg) -> Result<i16, Error<B>> {
+    fn read_signed_16(&mut self, reg: RegAddressP0) -> Result<i16, Error<B>> {
         let mut buf = [0u8; 2];
         self.read_bytes(reg, &mut buf)?;
         Ok(i16::from_be_bytes(buf))
     }
 
-    fn read_signed_24(&mut self, reg: Page0Reg) -> Result<i32, Error<B>> {
+    fn read_signed_24(&mut self, reg: RegAddressP0) -> Result<i32, Error<B>> {
         let mut buf = [0u8; 3];
         self.read_bytes(reg, &mut buf)?;
         // Sign-extend 24 -> 32.
@@ -1023,13 +1019,13 @@ where
         Ok(extended as i32)
     }
 
-    fn read_unsigned_32(&mut self, reg: Page0Reg) -> Result<u32, Error<B>> {
+    fn read_unsigned_32(&mut self, reg: RegAddressP0) -> Result<u32, Error<B>> {
         let mut buf = [0u8; 4];
         self.read_bytes(reg, &mut buf)?;
         Ok(u32::from_be_bytes(buf))
     }
 
-    fn read_signed_48(&mut self, reg: Page0Reg) -> Result<i64, Error<B>> {
+    fn read_signed_48(&mut self, reg: RegAddressP0) -> Result<i64, Error<B>> {
         let mut buf = [0u8; 6];
         self.read_bytes(reg, &mut buf)?;
         Ok(sign_extend_48(&buf))
@@ -1037,7 +1033,7 @@ where
 
     /// Reads a full 16-byte accumulator row (charge, energy, time) in one coherent burst,
     /// starting at the row's charge address (`0x00` for channel 1, `0x10` for channel 2).
-    fn read_accumulator_row(&mut self, reg: Page0Reg) -> Result<Accumulators, Error<B>> {
+    fn read_accumulator_row(&mut self, reg: RegAddressP0) -> Result<Accumulators, Error<B>> {
         let mut buf = [0u8; 16];
         self.read_bytes(reg, &mut buf)?;
         Ok(Accumulators {
@@ -1047,7 +1043,7 @@ where
         })
     }
 
-    fn read_signed_64(&mut self, reg: Page0Reg) -> Result<i64, Error<B>> {
+    fn read_signed_64(&mut self, reg: RegAddressP0) -> Result<i64, Error<B>> {
         let mut buf = [0u8; 8];
         self.read_bytes(reg, &mut buf)?;
         Ok(i64::from_be_bytes(buf))
@@ -1067,7 +1063,7 @@ where
         let value = RegControlRegister::default()
             .with_rdcvconf(true)
             .with_page(matches!(page, Page::Page1));
-        self.dcmd_write(Page0Reg::RegsCtrl.addr(), &value.into_bytes())?;
+        self.dcmd_write(RegAddressP0::RegsCtrl.addr(), &value.into_bytes())?;
         self.current_page = Some(page);
         Ok(())
     }
@@ -1082,7 +1078,7 @@ where
     /// Writes `data` to `reg` via `DCMD`. The cell monitors ignore command 0xFE.
     fn write_bytes<R: Register>(&mut self, reg: R, data: &[u8]) -> Result<(), Error<B>> {
         // REGSCTRL writes are themselves the page-switch mechanism; avoid recursion.
-        if reg.addr() != Page0Reg::RegsCtrl.addr() {
+        if reg.addr() != RegAddressP0::RegsCtrl.addr() {
             self.select_page(R::PAGE)?;
         }
         self.dcmd_write(reg.addr(), data)
