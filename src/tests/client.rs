@@ -13,8 +13,8 @@
 //!   slave's `[D0..Dn-1, DPEC0, DPEC1]` appearing on MISO after the 5-byte header.
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
-use crate::ltc2949::{
-    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, FaCtrl, FifoTag, Ltc2949Client, MuxInput,
+use crate::client::{
+    float24_encode, float24_encode_high2, Accumulators, AdcConf, Channel, FaCtrl, FifoTag, Client, MuxInput,
     NtcConfig, OpCtrl, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::mocks::MockSPIDevice;
@@ -159,7 +159,7 @@ fn expect_select_page(mock: &mut MockSPIDevice, page1: bool) {
 // ---------------------------------------------------------------------------
 
 /// Computes a DCMD ID byte from the read/write flag and the PECC field, mirroring
-/// the formula in [`crate::ltc2949`]. Used here only as a self-contained witness
+/// the formula in [`crate::client`]. Used here only as a self-contained witness
 /// that our `DCMD_ID_WRITE` constant matches the datasheet encoding.
 fn make_id(read: bool, pecc: u8) -> u8 {
     let pecc = pecc & 0x0F;

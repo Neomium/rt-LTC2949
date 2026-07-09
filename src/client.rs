@@ -1,8 +1,7 @@
 //! Driver for the [LTC2949](<https://www.analog.com/en/products/ltc2949.html>) current,
 //! voltage, charge and energy monitor.
 //!
-//! The LTC2949 is **not** a member of the LTC681X cell-monitor family and does not implement
-//! the [`DeviceTypes`](crate::monitor::DeviceTypes) trait — its register map (paginated, 256+
+//! The LTC2949 is **not** a member of the LTC681X cell-monitor family - its register map (paginated, 256+
 //! bytes) and command framing (`DCMD` 0xFE with an ID byte and configurable PEC stride) are
 //! distinct from the cell-monitor ADCV/RDCV model. It does however share isoSPI signalling
 //! and the PEC15 checksum with the LTC681X family and is intended to live on the same bus.
@@ -175,7 +174,7 @@
 //! share a single isoSPI link (usually one LTC6820). At the `embedded-hal` level that one
 //! physical [`SpiBus`](embedded_hal::spi::SpiBus) is shared between two
 //! [`SpiDevice`] handles — one driving the
-//! [`LTC2949`] client, the other driving the [`LTC681X`](crate::monitor::LTC681X) cell
+//! [`LTC2949`] client, the other driving the [`LTC681X`](ltc681x::monitor::LTC681X) cell
 //! monitor client — typically via `embedded-hal-bus` (e.g. `RefCellDevice`,
 //! `AtomicDevice` or `CriticalSectionDevice`).
 //!
@@ -241,12 +240,11 @@
 // `unused_parens` lint on newer rustc. Silence the lint module-wide.
 #![allow(unused_parens)]
 
-use crate::monitor::{NoPolling, PollMethod};
 use crate::pec15::PEC15;
+use crate::polling::{NoPolling, PollMethod};
 use embedded_hal::spi::{Operation, SpiDevice};
 use heapless::Vec;
 use modular_bitfield::prelude::*;
-
 // ---------------------------------------------------------------------------
 // Timing constants (microseconds)
 //
@@ -257,15 +255,15 @@ use modular_bitfield::prelude::*;
 // ---------------------------------------------------------------------------
 
 /// Worst-case core boot time from SLEEP/power-up to STANDBY (datasheet tBOOT).
-/// Returned by [`Ltc2949Client::start_wake_up`].
+/// Returned by [`Client::start_wake_up`].
 pub const T_BOOT_US: u32 = 100_000;
 
 /// isoSPI port start-up time after a wake edge (datasheet tREADY, 10 µs; doubled for margin).
-/// Returned by [`Ltc2949Client::wake_isospi`].
+/// Returned by [`Client::wake_isospi`].
 pub const T_READY_US: u32 = 20;
 
 /// Worst-case memory-lock acknowledge time (datasheet tMLCK, MEASURE mode; 40 ms in
-/// STANDBY). Returned by [`Ltc2949Client::request_memory_lock`].
+/// STANDBY). Returned by [`Client::request_memory_lock`].
 pub const T_MLCK_US: u32 = 130_000;
 
 // ---------------------------------------------------------------------------
@@ -543,7 +541,6 @@ pub struct OverCurrentConfig {
     pub polarity: u8,
 }
 
-
 // ---------------------------------------------------------------------------
 // NTC linearisation
 // ---------------------------------------------------------------------------
@@ -697,7 +694,7 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
 
 /// High-level LTC2949 operation set, the dependency-injection seam for hosts (mirrors
 /// [`LTC681XClient`](crate::monitor::LTC681XClient)). FIFO drains stay on [`LTC2949`].
-pub trait Ltc2949Client {
+pub trait Client {
     type Error;
 
     /// Starts wake-up (datasheet Figure 20): pulses the isoSPI edge and invalidates the page
@@ -840,7 +837,7 @@ pub trait Ltc2949Client {
 }
 
 /// LTC2949 client for the parallel-to-daisy-chain topology (datasheet Figure 12(B)),
-/// reached directly via `DCMD`. High-level ops are on the [`Ltc2949Client`] trait.
+/// reached directly via `DCMD`. High-level ops are on the [`Client`] trait.
 pub struct LTC2949<B, P>
 where
     B: SpiDevice<u8>,
@@ -867,7 +864,7 @@ where
     }
 }
 
-impl<B, P> Ltc2949Client for LTC2949<B, P>
+impl<B, P> Client for LTC2949<B, P>
 where
     B: SpiDevice<u8>,
     P: PollMethod<B>,
@@ -970,7 +967,7 @@ where
         // so a single 2-byte burst configures both.
         self.write_bytes(addr_n, &[negative as u8, positive as u8])
     }
-    
+
     fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
         self.write_bytes(Page0Reg::FGpioCtrl, &[gpio])
     }
