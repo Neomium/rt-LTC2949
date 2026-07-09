@@ -525,6 +525,26 @@ fn read_current1_positive_value() {
 }
 
 #[test]
+fn read_current1_avg_reads_moving_average_register() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0x9C, &[0x00, 0x04, 0x00]);
+
+    let mut client = LTC2949::new(mock);
+    assert_eq!(0x000400, client.read_current1_avg().unwrap());
+}
+
+#[test]
+fn read_current2_avg_decodes_24bit_signed_be() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xAC, &[0xFF, 0xFE, 0x00]);
+
+    let mut client = LTC2949::new(mock);
+    assert_eq!(-512, client.read_current2_avg().unwrap());
+}
+
+#[test]
 fn read_bat_decodes_16bit_signed_be() {
     // 0x7FFF = 32767 (max positive).
     let mut mock = MockSPIDevice::new();

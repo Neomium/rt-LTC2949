@@ -113,12 +113,14 @@ pub enum RegAddressP0 {
     Power1 = 0x93,
     Current2 = 0x96,
     Power2 = 0x99,
+    Current1Avg = 0x9C,
     Bat = 0xA0, // 16-bit
     Temp = 0xA2,
     Vcc = 0xA4,
     Slot1 = 0xA6,
     Slot2 = 0xA8,
     Vref = 0xAA,
+    Current2Avg = 0xAC,
     // Slow-mode auxiliary-MUX slot selection (datasheet Tables 57 & 58). SLOT1/2 each
     // have separate MUXN / MUXP registers, adjacent so a 2-byte burst sets both.
     Slot1MuxN = 0xEB,
@@ -623,11 +625,19 @@ pub trait Client {
     fn unlock_memory(&mut self) -> Result<(), Self::Error>;
 
     /// Reads I1 (slow-mode current 1) as a 24-bit two's-complement value.
-    /// LSB = 950 nV for slow mode, 237.5 nV for the averaged result.
+    /// LSB = 950 nV.
     fn read_current1(&mut self) -> Result<i32, Self::Error>;
 
     /// Reads I2 (slow-mode current 2). LSB = 950 nV.
     fn read_current2(&mut self) -> Result<i32, Self::Error>;
+
+    /// Reads I1AVG (moving average of the four preceding current 1 measurements).
+    /// LSB = 237.5 nV.
+    fn read_current1_avg(&mut self) -> Result<i32, Self::Error>;
+
+    /// Reads I2AVG (moving average of the four preceding current 2 measurements).
+    /// LSB = 237.5 nV.
+    fn read_current2_avg(&mut self) -> Result<i32, Self::Error>;
 
     /// Reads P1 (power 1 or voltage if P1ASV is set). LSB = 5.8368 µV²/Ω (power) or
     /// 46.875 µV (voltage).
@@ -891,6 +901,14 @@ where
 
     fn read_current2(&mut self) -> Result<i32, Error<B>> {
         self.read_signed_24(RegAddressP0::Current2)
+    }
+
+    fn read_current1_avg(&mut self) -> Result<i32, Error<B>> {
+        self.read_signed_24(RegAddressP0::Current1Avg)
+    }
+
+    fn read_current2_avg(&mut self) -> Result<i32, Error<B>> {
+        self.read_signed_24(RegAddressP0::Current2Avg)
     }
 
     fn read_power1(&mut self) -> Result<i32, Error<B>> {
