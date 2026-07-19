@@ -15,11 +15,11 @@
 
 use crate::client::{
     AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, DcmdId,
-    FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, SlotValue,
-    LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    Error as ClientError, FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig,
+    ShuntTcConfig, SlotValue, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
-use crate::mocks::MockSPIDevice;
+use crate::mocks::{BusError, MockSPIDevice};
 use crate::pec15::PEC15;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -223,6 +223,34 @@ fn trigger_adcv_broadcast_emits_0x0260_with_pec() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client.trigger_adcv_broadcast().unwrap();
+}
+
+#[test]
+fn trigger_adax_broadcast_emits_0x0460_with_pec() {
+    let mut mock = MockSPIDevice::new();
+    expect_write(&mut mock, cmd16_bytes(0x0460).to_vec());
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.trigger_adax().unwrap();
+}
+
+#[test]
+fn trigger_adax_propagates_bus_error() {
+    let mut mock = MockSPIDevice::new();
+    mock.expect_transaction().times(1).returning(|ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(cmd16_bytes(0x0460).as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.trigger_adax(),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
 }
 
 #[test]

@@ -51,6 +51,41 @@
 //! );
 //! ```
 //!
+//! ## ADAX with an LTC681X chain
+//!
+//! The LTC2949 and the cell-monitor client need separate [`SpiDevice`] handles backed by
+//! the same physical isoSPI bus. Sending [`Client::trigger_adax`] through the LTC2949 handle
+//! broadcasts ADAX (`0x0460`), so it also starts an AUX conversion on every LTC6813X in the
+//! chain.
+//!
+//! For the LTC2949 to react, `CONT` must be set and `FACONV` must remain clear. The command
+//! starts a fast single-shot conversion of the channels selected in [`FastControlRegister`]
+//! and clears the LTC2949 FIFOs before conversion.
+//!
+//! ```
+//!# use ltc2949::client::{Client, FastControlRegister, LTC2949, OpsControlRegister};
+//!# use ltc2949::example::ExampleSPIDevice;
+//!# use ltc681x::ltc6813::LTC6813;
+//!# use ltc681x::monitor::{LTC681X, NoPolling};
+//!#
+//! // On hardware, create both handles from one shared isoSPI bus.
+//! let meter_spi = ExampleSPIDevice::default();
+//! let chain_spi = ExampleSPIDevice::default();
+//!
+//! let mut meter = LTC2949::new(meter_spi);
+//! let _chain: LTC681X<_, NoPolling, LTC6813, 3> = LTC681X::ltc6813(chain_spi);
+//!
+//! meter
+//!     .write_opctrl(OpsControlRegister::default().with_cont(true))
+//!     .unwrap();
+//! meter
+//!     .write_factrl(FastControlRegister::default().with_facha(true))
+//!     .unwrap();
+//!
+//! // One broadcast starts the LTC2949 fast channels and all LTC6813 AUX conversions.
+//! meter.trigger_adax().unwrap();
+//! ```
+//!
 // `modular-bitfield`'s macro expansion emits `pub field: (bool)` etc., which trips the
 // `unused_parens` lint on newer rustc. Silence the lint module-wide.
 #![allow(unused_parens)]
@@ -1072,7 +1107,14 @@ pub trait Client {
     /// monitor. **Hazard:** also restarts the chain, so don't call it from a separate meter task.
     fn trigger_adcv_broadcast(&mut self) -> Result<(), Self::Error>;
 
-    /// Send ADAX adressed
+    /// Broadcasts ADAX (`0x0460`) on the shared bus.
+    ///
+    /// LTC2949 treats ADAX like every other ADCV-style command: with `CONT = 1` and
+    /// `FACONV = 0`, it starts a fast single-shot conversion of the channels enabled in
+    /// [`FastControlRegister`]. It does not specifically start a slow SLOT1/SLOT2 conversion.
+    ///
+    /// The broadcast also starts AUX conversions on attached LTC68xx cell monitors and clears
+    /// the LTC2949 FIFOs before conversion. With `FACONV = 1`, LTC2949 ignores the command.
     fn trigger_adax(&mut self) -> Result<(), Self::Error>;
 }
 
