@@ -1445,7 +1445,7 @@ where
     fn read_signed_48(&mut self, reg: RegAddressP0) -> Result<i64, Error<B>> {
         let mut buf = [0u8; 6];
         self.read_bytes(reg, &mut buf)?;
-        Ok(sign_extend_48(&buf))
+        Ok(Self::sign_extend_48(&buf))
     }
 
     /// Reads a full 16-byte accumulator row (charge, energy, time) in one coherent burst,
@@ -1454,8 +1454,8 @@ where
         let mut buf = [0u8; 16];
         self.read_bytes(reg, &mut buf)?;
         Ok(Accumulators {
-            charge: AccumulatedCharge::from_raw(sign_extend_48(&buf[0..6])),
-            energy: AccumulatedEnergy::from_raw(sign_extend_48(&buf[6..12])),
+            charge: AccumulatedCharge::from_raw(Self::sign_extend_48(&buf[0..6])),
+            energy: AccumulatedEnergy::from_raw(Self::sign_extend_48(&buf[6..12])),
             time: AccumulatedTime::from_raw(u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]])),
         })
     }
@@ -1577,30 +1577,30 @@ where
     }
 
     fn send_cmd16(&mut self, cmd: u16) -> Result<(), Error<B>> {
-        let frame = build_cmd16(cmd);
+        let frame = Self::build_cmd16(cmd);
         self.bus.write(&frame).map_err(Error::BusError)?;
         self.poll_method.end_sync_command(&mut self.bus).map_err(Error::BusError)?;
         Ok(())
     }
-}
 
-/// Sign-extends a big-endian 48-bit two's-complement value (`bytes[0..6]`) to `i64`.
-fn sign_extend_48(bytes: &[u8]) -> i64 {
-    let mut raw: u64 = 0;
-    for &b in &bytes[..6] {
-        raw = (raw << 8) | u64::from(b);
+    /// Sign-extends a big-endian 48-bit two's-complement value (`bytes[0..6]`) to `i64`.
+    fn sign_extend_48(bytes: &[u8]) -> i64 {
+        let mut raw: u64 = 0;
+        for &b in &bytes[..6] {
+            raw = (raw << 8) | u64::from(b);
+        }
+        if raw & 0x0000_8000_0000_0000 != 0 {
+            raw |= 0xFFFF_0000_0000_0000;
+        }
+        raw as i64
     }
-    if raw & 0x0000_8000_0000_0000 != 0 {
-        raw |= 0xFFFF_0000_0000_0000;
-    }
-    raw as i64
-}
 
-/// Builds a 4-byte LTC681X-style 16-bit command (CMD0, CMD1, PEC0, PEC1).
-fn build_cmd16(cmd: u16) -> [u8; 4] {
-    let mut frame = [(cmd >> 8) as u8, cmd as u8, 0, 0];
-    let pec = PEC15::calc(&frame[..2]);
-    frame[2] = pec[0];
-    frame[3] = pec[1];
-    frame
+    /// Builds a 4-byte LTC681X-style 16-bit command (CMD0, CMD1, PEC0, PEC1).
+    fn build_cmd16(cmd: u16) -> [u8; 4] {
+        let mut frame = [(cmd >> 8) as u8, cmd as u8, 0, 0];
+        let pec = PEC15::calc(&frame[..2]);
+        frame[2] = pec[0];
+        frame[3] = pec[1];
+        frame
+    }
 }
