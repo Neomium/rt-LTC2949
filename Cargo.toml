@@ -18,7 +18,7 @@ modular-bitfield = "0.13.1"
 ltc681x = {optional = true, version = "0.6.2"}
 
 [dev-dependencies]
-mockall = "0.11.0"
+mockall = "0.15.0"
 
 [features]
 default = ["example"]
