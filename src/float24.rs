@@ -1,3 +1,52 @@
+//! # LTC2949 Float24 encoding
+//!
+//! The LTC2949 stores NTC and sense-resistor temperature-compensation parameters in a
+//! device-specific 24-bit floating-point format. [`Float24`] converts an `f32` into the
+//! MSB-first bytes expected by those registers. The format consists of one sign bit, a 7-bit
+//! exponent biased by 63, and a 16-bit mantissa; conversion truncates the lower `f32`
+//! mantissa bits.
+//!
+//! ## Full three-byte values
+//!
+//! [`Float24::encode`] is used for reference resistors, Steinhart–Hart coefficients, and
+//! sense-resistor temperature coefficients. These examples are values from a realistic
+//! 10 kΩ NTC configuration.
+//!
+//! ```
+//! # use ltc2949::float24::Float24;
+//! let reference_resistor = Float24::new(10_000.0).encode();
+//! let coefficient_a = Float24::new(1.1382e-3).encode();
+//!
+//! assert_eq!([0x4C, 0x38, 0x80], reference_resistor);
+//! assert_eq!([0x35, 0x2A, 0x5F], coefficient_a);
+//! ```
+//!
+//! ## Truncated two-byte values
+//!
+//! [`Float24::encode_high`] returns only the exponent/sign byte and the high mantissa byte.
+//! The `RSxT0` registers use this representation and implicitly treat the omitted mantissa
+//! byte as zero.
+//!
+//! ```
+//! # use ltc2949::float24::Float24;
+//! let reference_temperature = Float24::new(20.0).encode_high();
+//!
+//! assert_eq!([0x43, 0x40], reference_temperature);
+//! ```
+//!
+//! ## Range handling
+//!
+//! Zero retains its sign. Values below the Float24 normal range underflow to signed zero,
+//! while values above its finite range saturate at the largest magnitude.
+//!
+//! ```
+//! # use ltc2949::float24::Float24;
+//! assert_eq!([0x00, 0x00, 0x00], Float24::new(f32::MIN_POSITIVE).encode());
+//! assert_eq!([0x80, 0x00, 0x00], Float24::new(-0.0).encode());
+//! assert_eq!([0x7E, 0xFF, 0xFF], Float24::new(f32::MAX).encode());
+//! assert_eq!([0xFE, 0xFF, 0xFF], Float24::new(f32::MIN).encode());
+//! ```
+
 /// LTC2949 Float24 value encoder.
 ///
 /// Float24 is stored MSB-first with 1 sign bit, a 7-bit exponent biased by 63,
