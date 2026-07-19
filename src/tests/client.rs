@@ -421,6 +421,39 @@ fn write_factrl_enables_fast_channels_1_and_2() {
 }
 
 #[test]
+fn write_fast_aux_mux_writes_muxn_then_muxp_in_one_burst() {
+    // FAMUXN at 0xF3 and FAMUXP at 0xF4 are adjacent, so both selections are
+    // written in one burst. Use distinct values to verify their on-wire order.
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF3, &[0x0F, 0x10]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_fast_aux_mux(MuxInput::VbatM as u8, MuxInput::VbatP as u8).unwrap();
+}
+
+#[test]
+fn write_fast_aux_mux_propagates_bus_error() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    let expected = dcmd_write_bytes(0xF3, &[0x00, 0x01]);
+    mock.expect_transaction().times(1).returning(move |ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(expected.as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_fast_aux_mux(MuxInput::Agnd as u8, MuxInput::V1 as u8),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
+}
+
+#[test]
 fn write_gpio_ctrl_emits_dcmd_to_fgpioctrl() {
     // FGPIOCTRL has four 2-bit GPIO control fields. 0x03 sets GPIO1CTRL=0b11
     // (drive GPIO1 high) and leaves GPIO2..GPIO4 at 0b00 (tristate).
