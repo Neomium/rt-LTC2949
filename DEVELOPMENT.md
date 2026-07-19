@@ -13,8 +13,3 @@ Tests can be executed using cargo:
 ````
 cargo test
 ````
-
-Testing spin mutexes:
-````
-cargo test --features spin
-````
