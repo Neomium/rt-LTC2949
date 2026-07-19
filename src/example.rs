@@ -1,10 +1,13 @@
-//! SPI bus mock for doc examples
+//! SPI device mock for doc examples.
+
 use core::convert::Infallible;
-use embedded_hal::digital::OutputPin;
-use embedded_hal::spi::{ErrorType, Operation, SpiBus, SpiDevice};
+
+use crate::pec15::PEC15;
+use embedded_hal::delay::DelayNs;
+use embedded_hal::spi::{ErrorType, Operation, SpiDevice};
 
 #[derive(Default)]
-pub struct ExampleSPIDevice {}
+pub struct ExampleSPIDevice;
 
 impl ErrorType for ExampleSPIDevice {
     type Error = Infallible;
@@ -12,20 +15,13 @@ impl ErrorType for ExampleSPIDevice {
 
 impl SpiDevice<u8> for ExampleSPIDevice {
     fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), Self::Error> {
-        let mut command = 0x0;
-
         for operation in operations {
             match operation {
-                Operation::Read(buffer) => {
-                    Self::response(command, buffer);
-                }
-                Operation::Transfer(buffer, write) => {
-                    command = write[1];
-                    Self::response(command, &mut buffer[4..]);
-                }
-                Operation::TransferInPlace(_) => panic!("Unexpected TransferInPlace operation"),
-                Operation::DelayNs(_) => panic!("Unexpected DelayNs operation"),
+                Operation::Transfer(read, write) => Self::transfer(read, write),
                 Operation::Write(_) => {}
+                Operation::Read(_) | Operation::TransferInPlace(_) | Operation::DelayNs(_) => {
+                    panic!("unexpected SPI operation in doc example")
+                }
             }
         }
 
@@ -34,82 +30,88 @@ impl SpiDevice<u8> for ExampleSPIDevice {
 }
 
 impl ExampleSPIDevice {
-    fn response(command: u8, buffer: &mut [u8]) {
-        match command {
-            // Status register A
-            0b0001_0000 => buffer.copy_from_slice(&[0x12, 0x62, 0xA8, 0x62, 0x00, 0x7D, 0x31, 0x8A]),
-            // Status register B
-            0b0001_0010 => buffer.copy_from_slice(&[0x00, 0xC8, 0x00, 0x66, 0x00, 0x1B, 0xF1, 0x40]),
-            // Cell voltage register B
-            0b0000_0100 => buffer.copy_from_slice(&[0x93, 0x61, 0xBB, 0x1E, 0xAE, 0x22, 0x9A, 0x1C]),
-            // Cell voltage register B
-            0b0000_0110 => buffer.copy_from_slice(&[0xDD, 0x66, 0x72, 0x1D, 0xA2, 0x1C, 0x11, 0x94]),
-            // Cell voltage register C
-            0b0000_1000 => buffer.copy_from_slice(&[0x61, 0x63, 0xBD, 0x1E, 0xE4, 0x22, 0x3F, 0x42]),
-            // Cell voltage register E
-            0b0000_1001 => buffer.copy_from_slice(&[0xDE, 0x64, 0x8F, 0x21, 0x8A, 0x21, 0x8F, 0xDA]),
-            // Aux voltage register A
-            0b0000_1100 => buffer.copy_from_slice(&[0x93, 0x61, 0xBB, 0x1E, 0xAE, 0x22, 0x9A, 0x1C]),
-            // Aux voltage register C
-            0b0000_1101 => buffer.copy_from_slice(&[0x61, 0x63, 0xBD, 0x1E, 0xE4, 0x22, 0x3F, 0x42]),
-            _ => buffer.copy_from_slice(&[0x0; 8]),
-        };
+    fn transfer(read: &mut [u8], write: &[u8]) {
+        if write.len() < 7 || write[0] != 0xFE {
+            return;
+        }
+
+        let addr = write[1];
+        let data_len = write.len() - 7;
+        let data = Self::data(addr, data_len);
+
+        read.fill(0);
+        read[5..5 + data_len].copy_from_slice(&data[..data_len]);
+        let pec = PEC15::calc(&data[..data_len]);
+        read[5 + data_len] = pec[0];
+        read[6 + data_len] = pec[1];
+    }
+
+    fn data(addr: u8, len: usize) -> [u8; 16] {
+        let mut data = [0u8; 16];
+        match addr {
+            0x00 => {
+                // C1 = 10,000,000; E1 = 10,000; TB1 = 10,000.
+                let row = [
+                    0x00, 0x00, 0x00, 0x98, 0x96, 0x80, 0x00, 0x00, 0x00, 0x00, 0x27, 0x10, 0x00, 0x00, 0x27, 0x10,
+                ];
+                data[..len].copy_from_slice(&row[..len]);
+            }
+            0x06 => data[..6].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x27, 0x10]), // E1 = 10,000.
+            0x0C => data[..4].copy_from_slice(&[0x00, 0x00, 0x27, 0x10]),             // TB1 = 10,000.
+            0x10 => {
+                // C2 = -6,000,000; E2 = -6,000; TB2 = 12,000.
+                let row = [
+                    0xFF, 0xFF, 0xFF, 0xA4, 0x72, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xE8, 0x90, 0x00, 0x00, 0x2E, 0xE0,
+                ];
+                data[..len].copy_from_slice(&row[..len]);
+            }
+            0x16 => data[..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xE8, 0x90]), // E2 = -6,000.
+            0x1C => data[..4].copy_from_slice(&[0x00, 0x00, 0x2E, 0xE0]),             // TB2 = 12,000.
+            0x24 => data[..8].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x3D, 0x09, 0x00]), // C3 = 4,000,000.
+            0x2C => data[..4].copy_from_slice(&[0x00, 0x00, 0x3A, 0x98]),             // TB3 = 15,000.
+            0x3C => data[..4].copy_from_slice(&[0x00, 0x00, 0x4E, 0x20]),             // TB4 = 20,000.
+            0x80 => data[0] = 0x10, // STATUS: result registers updated, no errors.
+            0x90 => data[..3].copy_from_slice(&[0x00, 0x03, 0xE8]), // I1 = 1,000 -> 9.5 A at 100 uOhm.
+            0x93 => data[..3].copy_from_slice(&[0x0F, 0x42, 0x40]), // P1 = 1,000,000.
+            0x96 => data[..3].copy_from_slice(&[0xFF, 0xFE, 0x0C]), // I2 = -500 -> -4.75 A at 100 uOhm.
+            0x99 => data[..3].copy_from_slice(&[0xF8, 0x5E, 0xE0]), // P2 = -500,000.
+            0x9C => data[..3].copy_from_slice(&[0x00, 0x0F, 0xA0]), // I1AVG = 4,000 -> 9.5 A.
+            0xA0 => data[..2].copy_from_slice(&[0x30, 0x39]), // BAT: 12_345 raw -> 4_629_375 uV.
+            0xA2 => data[..2].copy_from_slice(&[0x05, 0xD3]), // TEMP: 1,491 raw -> 25.05 C.
+            0xA4 => data[..2].copy_from_slice(&[0x05, 0xB4]), // VCC: 1,460 raw -> 3.2996 V.
+            0xA6 => data[..2].copy_from_slice(&[0x00, 0x7D]), // SLOT1: 125 raw -> 25.0 C.
+            0xAC => data[..3].copy_from_slice(&[0xFF, 0xF8, 0x30]), // I2AVG = -2,000 -> -4.75 A.
+            0xF7 if len >= 6 => {
+                data[..6].copy_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x80]);
+            }
+            0xF7 if len >= 3 => data[..3].copy_from_slice(&[0, 0, 0x80]), // FIFO terminator.
+            _ => {}
+        }
+        data
     }
 }
 
 #[derive(Default)]
-pub struct ExampleSPIBus {
-    poll_count: usize,
+pub struct ExampleDelay {
+    elapsed_us: u64,
 }
 
-impl ErrorType for ExampleSPIBus {
-    type Error = Infallible;
-}
-
-impl SpiBus<u8> for ExampleSPIBus {
-    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        // Poll call
-        if words.len() == 1 {
-            self.poll_count += 1;
-            if self.poll_count >= 2 {
-                words[0] = 0xff
-            } else {
-                words[0] = 0x0
-            };
-        }
-
-        Ok(())
-    }
-
-    fn write(&mut self, _words: &[u8]) -> Result<(), Self::Error> {
-        unimplemented!()
-    }
-
-    fn transfer(&mut self, _read: &mut [u8], _write: &[u8]) -> Result<(), Self::Error> {
-        unimplemented!()
-    }
-
-    fn transfer_in_place(&mut self, _words: &mut [u8]) -> Result<(), Self::Error> {
-        unimplemented!()
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        unimplemented!()
+impl ExampleDelay {
+    pub fn elapsed_us(&self) -> u64 {
+        self.elapsed_us
     }
 }
 
-pub struct ExampleCSPin {}
-
-impl embedded_hal::digital::ErrorType for ExampleCSPin {
-    type Error = Infallible;
-}
-
-impl OutputPin for ExampleCSPin {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+impl DelayNs for ExampleDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        self.elapsed_us += u64::from(ns.div_ceil(1_000));
     }
 
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+    fn delay_us(&mut self, us: u32) {
+        self.elapsed_us += u64::from(us);
+    }
+
+    fn delay_ms(&mut self, ms: u32) {
+        self.elapsed_us += u64::from(ms) * 1_000;
     }
 }

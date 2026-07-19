@@ -1,62 +1,66 @@
-# Client for LTC681X battery stack monitors
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Crates.io](https://img.shields.io/crates/v/ltc681x.svg)](https://crates.io/crates/ltc681x)
-[![Actions Status](https://github.com/pegasus-aero/rt-LTC681X/workflows/QA/badge.svg)](http://github.com/pegasus-aero/rt-LTC681X/actions)
+# LTC2949 Rust driver
 
-Abstraction for LTC681X family. Supports all devices of LTC681X family: [LTC6813](https://www.analog.com/en/products/ltc6813-1.html), [LTC6812](https://www.analog.com/en/products/ltc6812-1.html), [LTC6811](https://www.analog.com/en/products/ltc6811-1.html) and [LTC6810](https://www.analog.com/en/products/ltc6810-1.html).
+[![Crates.io](https://img.shields.io/crates/v/ltc2949.svg)](https://crates.io/crates/ltc2949)
+[![Documentation](https://docs.rs/ltc2949/badge.svg)](https://docs.rs/ltc2949)
+[![QA](https://github.com/neomium/rt-LTC2949/actions/workflows/qa.yaml/badge.svg)](https://github.com/neomium/rt-LTC2949/actions/workflows/qa.yaml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Currently, the following features are implemented:
- * [Cell and GPIO conversion](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#conversion)
- * [Reading cell and GPIO voltage registers](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#reading-registers)
- * [Multiple devices in daisy chain](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#multiple-devices-in-daisy-chain)
- * [ADC status polling (SDO line method)](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#polling)
- * [Mapping voltages to GPIO and cell groups](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#mapping-voltages)
- * [Abstracted device configuration](https://docs.rs/ltc681x/latest/ltc681x/config/index.html)
- * [Overlapping ADC measurement](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#overlap-measurement-adol-command)
- * [Internal device parameters measurement](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html#internal-device-parameters-adstat-command)
+`ltc2949` is a `no_std` Rust driver for the Analog Devices
+[LTC2949](https://www.analog.com/en/products/ltc2949.html) current, voltage,
+charge, and energy monitor. It uses the `embedded-hal` SPI traits and supports
+an LTC2949 on its own or connected in parallel with an LTC68xx cell-monitor
+daisy chain on the same isoSPI bus.
+
+The driver provides register configuration, slow and fast measurement access,
+accumulator readings, status and fault information, FIFO handling, and NTC and
+shunt-temperature compensation. Required waits are returned to the application
+instead of blocking inside the driver.
 
 ## Example
-For all details see [monitor](https://docs.rs/ltc681x/latest/ltc681x/monitor/index.html) module.
 
-````Rust
-use ltc681x::example::ExampleSPIDevice;
-use ltc681x::ltc6813::{CellSelection, Channel, GPIOSelection, LTC6813};
-use ltc681x::monitor::{ADCMode, LTC681X, LTC681XClient, PollClient};
+The following function wakes the monitor, starts continuous measurement, and
+reads the battery voltage:
 
-let spi_bus = ExampleSPIDevice::default();
+```rust
+use embedded_hal::{delay::DelayNs, spi::SpiDevice};
+use ltc2949::client::{Client, Error, LTC2949, OpsControlRegister};
 
-// LTC6813 device
-let mut client: LTC681X<_, _, LTC6813, 1> = LTC681X::ltc6813(spi_bus);
+fn read_battery_voltage<SPI, D>(spi: SPI, delay: &mut D) -> Result<f32, Error<SPI>>
+where
+    SPI: SpiDevice<u8>,
+    D: DelayNs,
+{
+    let mut monitor = LTC2949::new(spi);
 
-// Starts conversion for cell group 1
-client.start_conv_cells(ADCMode::Normal, CellSelection::Group1, true);
+    let boot_time_us = monitor.start_wake_up()?;
+    delay.delay_us(boot_time_us);
+    monitor.confirm_wake_up()?;
 
-// Wait until ADC conversion is finished or poll the status
-// (s. 'Conversion time' and 'Polling' section(s) of monitor module)
+    monitor.write_opctrl(OpsControlRegister::default().with_cont(true))?;
+    delay.delay_ms(100);
 
-// Returns the value of cell group A. In case of LTC613: cell 1, 7 and 13
-let voltages = client.read_voltages(CellSelection::Group1).unwrap();
-assert_eq!(Channel::Cell1, voltages[0][0].channel);
-assert_eq!(24979, voltages[0][0].voltage);
- ````
+    Ok(monitor.read_bat()?.decode())
+}
+```
 
-## State
+See the [Rust documentation](https://docs.rs/ltc2949) for detailed examples,
+configuration options, timing requirements, and shared-bus usage with LTC68xx
+cell monitors.
 
-> :warning: The crate is still incomplete, but is under active development.
+## Contributing
 
-> :warning: The crate has only been tested for the LTC6813 variant. Although the protocol of the LTC681X family is essentially the same, inconsistencies are still conceivable for some variants. Practical tests + feedback with other variants are therefore welcome.
+Contributions are welcome. Before opening a pull request, please:
 
-## Development
+- run the test suite with `cargo test`;
+- format the code with `cargo fmt`;
+- add or update tests for behavioral changes.
 
-Any form of support is greatly appreciated. Feel free to create issues and PRs.
-See [DEVELOPMENT](DEVELOPMENT.md) for more details.  
+For the complete contribution guidelines, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## License
-Licensed under either of
 
-* Apache License, Version 2.0, (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
-* MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
-at your option.
+This project is dual-licensed under either of the following licenses, at your
+option:
 
-Each contributor agrees that his/her contribution covers both licenses.
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)

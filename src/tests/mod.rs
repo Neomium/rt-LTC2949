@@ -1,5 +1,4 @@
-mod device_config;
-mod monitor;
+mod client;
+mod float24;
 mod pec15;
-mod reg_config;
 mod spi;
