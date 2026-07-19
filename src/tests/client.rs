@@ -14,9 +14,9 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, FastControlRegister,
-    FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, SlotValue, LTC2949, T_BOOT_US,
-    T_MLCK_US, T_READY_US,
+    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, DcmdId,
+    FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, SlotValue,
+    LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::MockSPIDevice;
@@ -942,4 +942,24 @@ fn read_fifo_spans_two_bursts_for_more_than_five_samples() {
     for (i, s) in samples.iter().enumerate() {
         assert_eq!(i as i16, s.raw);
     }
+}
+
+#[test]
+fn dcmd_id_read_with_pecc15_encodes_0x9b() {
+    assert_eq!(0x9B, u8::from(DcmdId::read(15)));
+}
+
+#[test]
+fn dcmd_id_write_with_pecc15_encodes_0x5b() {
+    assert_eq!(0x5B, u8::from(DcmdId::write(15)));
+}
+
+#[test]
+fn dcmd_id_write_with_pecc1_matches_datasheet_example() {
+    assert_eq!(0x45, u8::from(DcmdId::write(1)));
+}
+
+#[test]
+fn dcmd_id_pecc_is_limited_to_four_bits() {
+    assert_eq!(u8::from(DcmdId::read(0x0F)), u8::from(DcmdId::read(0xFF)));
 }

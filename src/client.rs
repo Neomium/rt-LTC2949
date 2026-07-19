@@ -77,6 +77,45 @@ pub const T_MLCK_US: u32 = 130_000;
 /// Fixed PECC field (datasheet Table 12): 16 data bytes per PEC group.
 const PECC: u8 = 15;
 
+/// Encoded ID byte carried by direct-command read and write frames (datasheet Table 12).
+pub(crate) struct DcmdId {
+    /// `true` for a read command (`RW = 1`, `!RW = 0`), `false` for a write command.
+    read: bool,
+    /// Four-bit PEC-count field; encodes the number of data bytes per PEC as `N - 1`.
+    pecc: u8,
+}
+
+impl DcmdId {
+    pub(crate) fn read(pecc: u8) -> Self {
+        Self::new(true, pecc)
+    }
+
+    pub(crate) fn write(pecc: u8) -> Self {
+        Self::new(false, pecc)
+    }
+
+    pub(crate) fn new(read: bool, pecc: u8) -> Self {
+        Self {
+            read,
+            pecc: pecc & 0x0F,
+        }
+    }
+}
+
+impl From<DcmdId> for u8 {
+    fn from(id: DcmdId) -> Self {
+        let p3 = (id.pecc >> 3) & 1;
+        let p2 = (id.pecc >> 2) & 1;
+        let p1 = (id.pecc >> 1) & 1;
+        let p0 = id.pecc & 1;
+        let rw = u8::from(id.read);
+        let not_rw = rw ^ 1;
+        let bit5 = p3 ^ p2;
+        let bit2 = p1 ^ p0;
+        (rw << 7) | (not_rw << 6) | (bit5 << 5) | (p3 << 4) | (p2 << 3) | (bit2 << 2) | (p1 << 1) | p0
+    }
+}
+
 /// Max data bytes covered by one PEC group (`PECC + 1`).
 const N_PER_PEC: usize = 16;
 
@@ -1462,33 +1501,16 @@ where
         self.dcmd_write(reg.addr(), data)
     }
 
-    // -- DCMD framing -----------------------------------------------------
-    //
-    // DCMD frame layout (datasheet Table 11):
-    //
-    //   [0xFE, RADDR, PEC0, PEC1, ID, D0..D(N-1), PEC0, PEC1, D(N)..D(2N-1), PEC0, PEC1, ...]
-    //
-    // The PEC on bytes 2..4 is computed over [0xFE, RADDR]. Each subsequent PEC covers the
-    // preceding `N` data bytes. `N` is encoded in the ID byte's PECC field
-    // (`PECC = N-1`, range 0..=15). The ID byte itself carries redundancy so it is not
-    // covered by a PEC.
-
-    /// Constructs the ID byte for a DCMD (datasheet Table 12).
-    fn make_id(read: bool) -> u8 {
-        let pecc = PECC & 0x0F;
-        let p3 = (pecc >> 3) & 1;
-        let p2 = (pecc >> 2) & 1;
-        let p1 = (pecc >> 1) & 1;
-        let p0 = pecc & 1;
-        let rw = u8::from(read);
-        let not_rw = rw ^ 1;
-        let bit5 = p3 ^ p2;
-        let bit2 = p1 ^ p0;
-        (rw << 7) | (not_rw << 6) | (bit5 << 5) | (p3 << 4) | (p2 << 3) | (bit2 << 2) | (p1 << 1) | p0
-    }
-
     /// Sends a DCMD write transaction. `data` must fit one PEC group (≤ 16 bytes); every
     /// caller already stays within that (the 9-byte NTC burst is the largest).
+    /// DCMD frame layout (datasheet Table 11):
+    ///
+    ///   [0xFE, RADDR, PEC0, PEC1, ID, D0..D(N-1), PEC0, PEC1, D(N)..D(2N-1), PEC0, PEC1, ...]
+    ///
+    /// The PEC on bytes 2..4 is computed over [0xFE, RADDR]. Each subsequent PEC covers the
+    /// preceding `N` data bytes. `N` is encoded in the ID byte's PECC field
+    /// (`PECC = N-1`, range 0..=15). The ID byte itself carries redundancy so it is not
+    /// covered by a PEC.
     fn dcmd_write(&mut self, addr: u8, data: &[u8]) -> Result<(), Error<B>> {
         // Frame: 4 (header+PEC) + 1 (ID) + ≤16 (data) + 2 (PEC) = 23 bytes max.
         debug_assert!(data.len() <= N_PER_PEC, "DCMD write exceeds one PEC group");
@@ -1499,7 +1521,7 @@ where
         let header_pec = PEC15::calc(&frame[0..2]);
         frame[2] = header_pec[0];
         frame[3] = header_pec[1];
-        frame[4] = Self::make_id(false);
+        frame[4] = DcmdId::write(PECC).into();
 
         let n = data.len();
         frame[5..5 + n].copy_from_slice(data);
@@ -1531,7 +1553,7 @@ where
         let header_pec = PEC15::calc(&mosi[0..2]);
         mosi[2] = header_pec[0];
         mosi[3] = header_pec[1];
-        mosi[4] = Self::make_id(true);
+        mosi[4] = DcmdId::read(PECC).into();
         // bytes 5..5+n and the trailing PEC bytes stay 0xFF (don't-care on MOSI).
 
         let total = 5 + n + 2;
