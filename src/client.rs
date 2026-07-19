@@ -179,6 +179,7 @@ pub enum RegAddressP1 {
 /// volts at the current sense inputs.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CurrentSenseVoltage {
+    /// Raw signed 24-bit ADC code, sign-extended to `i32`.
     raw: i32,
 }
 
@@ -207,6 +208,7 @@ impl CurrentSenseVoltage {
 /// The averaged result has a 4x finer LSB than the unaveraged slow-mode current result.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct AveragedCurrentSenseVoltage {
+    /// Raw signed 24-bit ADC code, sign-extended to `i32`.
     raw: i32,
 }
 
@@ -236,6 +238,7 @@ impl AveragedCurrentSenseVoltage {
 /// in [`AdcConfiguration`].
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct PowerOrVoltage {
+    /// Raw signed 24-bit ADC code, sign-extended to `i32`.
     raw: i32,
 }
 
@@ -269,6 +272,7 @@ impl PowerOrVoltage {
 /// Raw BAT battery-voltage result.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct BatteryVoltage {
+    /// Raw signed 16-bit ADC code.
     raw: i16,
 }
 
@@ -295,6 +299,7 @@ impl BatteryVoltage {
 /// Raw internal die-temperature result.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct DieTemperature {
+    /// Raw signed 16-bit ADC code.
     raw: i16,
 }
 
@@ -328,6 +333,7 @@ impl DieTemperature {
 /// Raw A/DVCC supply-voltage result.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct SupplyVoltage {
+    /// Raw signed 16-bit ADC code.
     raw: i16,
 }
 
