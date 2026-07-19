@@ -143,16 +143,16 @@
 //! let bat_uv  = (bat.decode() * 1_000_000.0) as i32;
 //! assert_eq!(4_629_375, bat_uv);
 //!
-//! let slot1_raw = client.read_slot1()?;       // i16, LSB = 0.2 °C (NTC mode)
-//! let temp_decic = slot1_raw as i32 * 2;      // tenths of a °C
+//! let slot1 = client.read_slot1()?;           // SlotValue
+//! let temp_decic = (slot1.decode_temperature() * 10.0) as i32;
 //! assert_eq!(250, temp_decic);
 //!
 //! // ---- Charge accumulation (state-of-charge) --------------------------
 //! // C1 keeps integrating current as long as CONT is set; coulombs are
 //! // C1 · 377.887 ps · V / R_shunt (internal clock or 4 MHz crystal).
-//! let charge1_raw = client.read_charge1()?;   // i64 (48-bit signed)
-//! // For a 100 µΩ shunt:
-//! //   coulombs = charge1_raw * 377.887e-12 / 100e-6
+//! let charge1 = client.read_charge1()?;       // AccumulatedCharge
+//! let coulombs = charge1.decode_coulombs(100e-6); // 100 µΩ shunt
+//! assert_eq!(0.0, coulombs);
 //!
 //! // ---- Fast measurements synchronised with the cell monitors ----------
 //! // Configure channels 1 and 2 for fast single-shot, then broadcast ADCV

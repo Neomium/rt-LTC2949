@@ -357,6 +357,149 @@ impl SupplyVoltage {
     }
 }
 
+/// Raw SLOT1/SLOT2 result.
+///
+/// The value represents either an auxiliary-input voltage or an NTC temperature,
+/// depending on the corresponding `NTC1`/`NTC2` bit in [`AdcConfiguration`].
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct SlotValue {
+    /// Raw signed 16-bit ADC code.
+    raw: i16,
+}
+
+impl SlotValue {
+    /// Voltage represented by one raw ADC code when NTC conversion is disabled.
+    pub const LSB_VOLTS: f32 = 375e-6;
+    /// Temperature represented by one raw ADC code when NTC conversion is enabled.
+    pub const LSB_DEGREES_CELSIUS: f32 = 0.2;
+
+    /// Wraps a raw signed 16-bit SLOT ADC code.
+    pub const fn from_raw(raw: i16) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed 16-bit ADC code.
+    pub fn raw(self) -> i16 {
+        self.raw
+    }
+
+    /// Decodes a voltage-mode SLOT result into volts.
+    pub fn decode_voltage(self) -> f32 {
+        self.raw as f32 * Self::LSB_VOLTS
+    }
+
+    /// Decodes an NTC-mode SLOT result into degrees Celsius.
+    pub fn decode_temperature(self) -> f32 {
+        self.raw as f32 * Self::LSB_DEGREES_CELSIUS
+    }
+}
+
+/// Raw accumulated charge result from C1, C2 or C3.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct AccumulatedCharge {
+    /// Raw signed accumulator code, sign-extended to `i64` for 48-bit registers.
+    raw: i64,
+}
+
+impl AccumulatedCharge {
+    /// Volt-seconds represented by one raw code with the internal clock or a 4 MHz crystal.
+    pub const LSB_VOLT_SECONDS: f64 = 377.887e-12;
+
+    /// Wraps a raw signed 48-bit or 64-bit accumulator code.
+    pub const fn from_raw(raw: i64) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed accumulator code.
+    pub fn raw(self) -> i64 {
+        self.raw
+    }
+
+    /// Decodes the result into volt-seconds for the internal clock or a 4 MHz crystal.
+    ///
+    /// With a freely configured external clock, use the LSB formula from datasheet Table 27
+    /// instead because the scale depends on `fEXT`, `PRE` and `DIV`.
+    pub fn decode(self) -> f64 {
+        self.raw as f64 * Self::LSB_VOLT_SECONDS
+    }
+
+    /// Decodes the result into coulombs using the external shunt resistance.
+    ///
+    /// Pass the channel's shunt for C1/C2 and the channel-1 shunt for the weighted C3 sum.
+    /// This scale applies to the internal clock or a 4 MHz crystal.
+    pub fn decode_coulombs(self, shunt_ohms: f64) -> f64 {
+        self.decode() / shunt_ohms
+    }
+}
+
+/// Raw accumulated energy result from E1, E2 or E4.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct AccumulatedEnergy {
+    /// Raw signed accumulator code, sign-extended to `i64` for 48-bit registers.
+    raw: i64,
+}
+
+impl AccumulatedEnergy {
+    /// Volt-squared-seconds represented by one raw code with the internal clock or a 4 MHz crystal.
+    pub const LSB_VOLT_SQUARED_SECONDS: f64 = 2.32175e-9;
+
+    /// Wraps a raw signed 48-bit or 64-bit accumulator code.
+    pub const fn from_raw(raw: i64) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw signed accumulator code.
+    pub fn raw(self) -> i64 {
+        self.raw
+    }
+
+    /// Decodes the result into volt-squared-seconds for the internal clock or a 4 MHz crystal.
+    ///
+    /// With a freely configured external clock, use the LSB formula from datasheet Table 27
+    /// instead because the scale depends on `fEXT`, `PRE` and `DIV`.
+    pub fn decode(self) -> f64 {
+        self.raw as f64 * Self::LSB_VOLT_SQUARED_SECONDS
+    }
+
+    /// Decodes the result into joules using the external shunt resistance.
+    ///
+    /// Pass the channel's shunt for E1/E2 and the channel-1 shunt for the weighted E4 sum.
+    /// This scale applies to the internal clock or a 4 MHz crystal.
+    pub fn decode_joules(self, shunt_ohms: f64) -> f64 {
+        self.decode() / shunt_ohms
+    }
+}
+
+/// Raw accumulated time-base result from TB1 through TB4.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct AccumulatedTime {
+    /// Raw unsigned 32-bit accumulator code.
+    raw: u32,
+}
+
+impl AccumulatedTime {
+    /// Seconds represented by one raw code with the internal clock or a 4 MHz crystal.
+    pub const LSB_SECONDS: f64 = 397.777e-6;
+
+    /// Wraps a raw unsigned 32-bit accumulator code.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self { raw }
+    }
+
+    /// Returns the raw unsigned 32-bit accumulator code.
+    pub fn raw(self) -> u32 {
+        self.raw
+    }
+
+    /// Decodes the result into seconds for the internal clock or a 4 MHz crystal.
+    ///
+    /// With a freely configured external clock, use the LSB formula from datasheet Table 27
+    /// instead because the scale depends on `fEXT`, `PRE` and `DIV`.
+    pub fn decode(self) -> f64 {
+        self.raw as f64 * Self::LSB_SECONDS
+    }
+}
+
 /// A device register resolving to a memory [`Page`] and an on-bus address byte, so the
 /// framing helpers take a register and derive the page rather than threading both.
 trait Register: Copy {
@@ -626,12 +769,12 @@ pub struct FifoSample {
 /// share a 16-byte row, so one burst reads them from the same `CONT` cycle (no lock needed).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct Accumulators {
-    /// Charge (48-bit two's-complement; units LSB·377.887 ps·V).
-    pub charge: i64,
+    /// Charge (48-bit two's-complement).
+    pub charge: AccumulatedCharge,
     /// Energy (48-bit two's-complement).
-    pub energy: i64,
+    pub energy: AccumulatedEnergy,
     /// Time base (32-bit unsigned).
-    pub time: u32,
+    pub time: AccumulatedTime,
 }
 
 /// Overcurrent control register payload for OCC1CTRL/OCC2CTRL (datasheet Tables 50 & 51).
@@ -840,43 +983,43 @@ pub trait Client {
     /// Reads A/DVCC supply voltage. LSB = 2.26 mV.
     fn read_vcc(&mut self) -> Result<SupplyVoltage, Self::Error>;
 
-    /// Reads SLOT1 — voltage (375 µV/LSB) or temperature (0.2 °C/LSB) depending on NTC1
-    /// in ADCCONF.
-    fn read_slot1(&mut self) -> Result<i16, Self::Error>;
+    /// Reads SLOT1 as a [`SlotValue`] — voltage or temperature depending on NTC1 in
+    /// ADCCONF.
+    fn read_slot1(&mut self) -> Result<SlotValue, Self::Error>;
 
-    /// Reads SLOT2 — voltage (375 µV/LSB) or temperature (0.2 °C/LSB) depending on NTC2
-    /// in ADCCONF.
-    fn read_slot2(&mut self) -> Result<i16, Self::Error>;
+    /// Reads SLOT2 as a [`SlotValue`] — voltage or temperature depending on NTC2 in
+    /// ADCCONF.
+    fn read_slot2(&mut self) -> Result<SlotValue, Self::Error>;
 
-    /// Reads Charge1 (48-bit two's-complement, units LSB·377.887 ps·V).
-    fn read_charge1(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Charge1 (48-bit two's-complement) as [`AccumulatedCharge`].
+    fn read_charge1(&mut self) -> Result<AccumulatedCharge, Self::Error>;
 
-    /// Reads Charge2 (48-bit).
-    fn read_charge2(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Charge2 (48-bit two's-complement) as [`AccumulatedCharge`].
+    fn read_charge2(&mut self) -> Result<AccumulatedCharge, Self::Error>;
 
-    /// Reads Charge3 — weighted sum of channel 1 and channel 2 (64-bit).
-    fn read_charge3(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Charge3 — the weighted channel-1/channel-2 sum (64-bit two's-complement).
+    fn read_charge3(&mut self) -> Result<AccumulatedCharge, Self::Error>;
 
-    /// Reads Energy1 (48-bit).
-    fn read_energy1(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Energy1 (48-bit two's-complement) as [`AccumulatedEnergy`].
+    fn read_energy1(&mut self) -> Result<AccumulatedEnergy, Self::Error>;
 
-    /// Reads Energy2 (48-bit).
-    fn read_energy2(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Energy2 (48-bit two's-complement) as [`AccumulatedEnergy`].
+    fn read_energy2(&mut self) -> Result<AccumulatedEnergy, Self::Error>;
 
-    /// Reads Energy4 — weighted sum of channel 1 and channel 2 (64-bit).
-    fn read_energy4(&mut self) -> Result<i64, Self::Error>;
+    /// Reads Energy4 — the weighted channel-1/channel-2 sum (64-bit two's-complement).
+    fn read_energy4(&mut self) -> Result<AccumulatedEnergy, Self::Error>;
 
-    /// Reads time-base 1 (32-bit unsigned).
-    fn read_time1(&mut self) -> Result<u32, Self::Error>;
+    /// Reads time-base 1 (32-bit unsigned) as [`AccumulatedTime`].
+    fn read_time1(&mut self) -> Result<AccumulatedTime, Self::Error>;
 
-    /// Reads time-base 2.
-    fn read_time2(&mut self) -> Result<u32, Self::Error>;
+    /// Reads time-base 2 as [`AccumulatedTime`].
+    fn read_time2(&mut self) -> Result<AccumulatedTime, Self::Error>;
 
-    /// Reads time-base 3.
-    fn read_time3(&mut self) -> Result<u32, Self::Error>;
+    /// Reads time-base 3 as [`AccumulatedTime`].
+    fn read_time3(&mut self) -> Result<AccumulatedTime, Self::Error>;
 
-    /// Reads time-base 4.
-    fn read_time4(&mut self) -> Result<u32, Self::Error>;
+    /// Reads time-base 4 as [`AccumulatedTime`].
+    fn read_time4(&mut self) -> Result<AccumulatedTime, Self::Error>;
 
     /// Reads channel 1's charge, energy and time-base ([`Accumulators`]) in one coherent
     /// 16-byte burst — prefer this for SoC integration over separate charge/time reads.
@@ -1118,52 +1261,52 @@ where
         self.read_signed_16(RegAddressP0::Vcc).map(SupplyVoltage::from_raw)
     }
 
-    fn read_slot1(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(RegAddressP0::Slot1)
+    fn read_slot1(&mut self) -> Result<SlotValue, Error<B>> {
+        self.read_signed_16(RegAddressP0::Slot1).map(SlotValue::from_raw)
     }
 
-    fn read_slot2(&mut self) -> Result<i16, Error<B>> {
-        self.read_signed_16(RegAddressP0::Slot2)
+    fn read_slot2(&mut self) -> Result<SlotValue, Error<B>> {
+        self.read_signed_16(RegAddressP0::Slot2).map(SlotValue::from_raw)
     }
 
-    fn read_charge1(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(RegAddressP0::Charge1)
+    fn read_charge1(&mut self) -> Result<AccumulatedCharge, Error<B>> {
+        self.read_signed_48(RegAddressP0::Charge1).map(AccumulatedCharge::from_raw)
     }
 
-    fn read_charge2(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(RegAddressP0::Charge2)
+    fn read_charge2(&mut self) -> Result<AccumulatedCharge, Error<B>> {
+        self.read_signed_48(RegAddressP0::Charge2).map(AccumulatedCharge::from_raw)
     }
 
-    fn read_charge3(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_64(RegAddressP0::Charge3)
+    fn read_charge3(&mut self) -> Result<AccumulatedCharge, Error<B>> {
+        self.read_signed_64(RegAddressP0::Charge3).map(AccumulatedCharge::from_raw)
     }
 
-    fn read_energy1(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(RegAddressP0::Energy1)
+    fn read_energy1(&mut self) -> Result<AccumulatedEnergy, Error<B>> {
+        self.read_signed_48(RegAddressP0::Energy1).map(AccumulatedEnergy::from_raw)
     }
 
-    fn read_energy2(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_48(RegAddressP0::Energy2)
+    fn read_energy2(&mut self) -> Result<AccumulatedEnergy, Error<B>> {
+        self.read_signed_48(RegAddressP0::Energy2).map(AccumulatedEnergy::from_raw)
     }
 
-    fn read_energy4(&mut self) -> Result<i64, Error<B>> {
-        self.read_signed_64(RegAddressP0::Energy4)
+    fn read_energy4(&mut self) -> Result<AccumulatedEnergy, Error<B>> {
+        self.read_signed_64(RegAddressP0::Energy4).map(AccumulatedEnergy::from_raw)
     }
 
-    fn read_time1(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(RegAddressP0::Time1)
+    fn read_time1(&mut self) -> Result<AccumulatedTime, Error<B>> {
+        self.read_unsigned_32(RegAddressP0::Time1).map(AccumulatedTime::from_raw)
     }
 
-    fn read_time2(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(RegAddressP0::Time2)
+    fn read_time2(&mut self) -> Result<AccumulatedTime, Error<B>> {
+        self.read_unsigned_32(RegAddressP0::Time2).map(AccumulatedTime::from_raw)
     }
 
-    fn read_time3(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(RegAddressP0::Time3)
+    fn read_time3(&mut self) -> Result<AccumulatedTime, Error<B>> {
+        self.read_unsigned_32(RegAddressP0::Time3).map(AccumulatedTime::from_raw)
     }
 
-    fn read_time4(&mut self) -> Result<u32, Error<B>> {
-        self.read_unsigned_32(RegAddressP0::Time4)
+    fn read_time4(&mut self) -> Result<AccumulatedTime, Error<B>> {
+        self.read_unsigned_32(RegAddressP0::Time4).map(AccumulatedTime::from_raw)
     }
 
     fn read_accumulators1(&mut self) -> Result<Accumulators, Error<B>> {
@@ -1272,9 +1415,9 @@ where
         let mut buf = [0u8; 16];
         self.read_bytes(reg, &mut buf)?;
         Ok(Accumulators {
-            charge: sign_extend_48(&buf[0..6]),
-            energy: sign_extend_48(&buf[6..12]),
-            time: u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            charge: AccumulatedCharge::from_raw(sign_extend_48(&buf[0..6])),
+            energy: AccumulatedEnergy::from_raw(sign_extend_48(&buf[6..12])),
+            time: AccumulatedTime::from_raw(u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]])),
         })
     }
 

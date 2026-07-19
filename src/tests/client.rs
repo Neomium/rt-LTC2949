@@ -14,8 +14,9 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    Accumulators, AdcConfiguration, Channel, Client, FastControlRegister, FifoTag, MuxInput, NtcConfig,
-    OpsControlRegister, OverCurrentConfig, ShuntTcConfig, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, FastControlRegister,
+    FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, ShuntTcConfig, SlotValue, LTC2949, T_BOOT_US,
+    T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::MockSPIDevice;
@@ -288,14 +289,9 @@ fn read_accumulators1_decodes_row_in_one_coherent_burst() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     let acc = client.read_accumulators1().unwrap();
-    assert_eq!(
-        acc,
-        Accumulators {
-            charge: 5,
-            energy: -1,
-            time: 10
-        }
-    );
+    assert_eq!(5, acc.charge.raw());
+    assert_eq!(-1, acc.energy.raw());
+    assert_eq!(10, acc.time.raw());
 }
 
 #[test]
@@ -307,14 +303,9 @@ fn read_accumulators2_reads_from_row_0x10() {
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     let acc = client.read_accumulators2().unwrap();
-    assert_eq!(
-        acc,
-        Accumulators {
-            charge: 0,
-            energy: 0,
-            time: 0
-        }
-    );
+    assert_eq!(0, acc.charge.raw());
+    assert_eq!(0, acc.energy.raw());
+    assert_eq!(0, acc.time.raw());
 }
 
 #[test]
@@ -337,7 +328,7 @@ fn memory_lock_request_read_unlock_sequence() {
     // ... host waits T_MLCK_US microseconds (no bus traffic) ...
     let charge = client.read_charge1().unwrap();
     client.unlock_memory().unwrap();
-    assert_eq!(charge, 1);
+    assert_eq!(charge.raw(), 1);
 }
 
 #[test]
@@ -617,6 +608,41 @@ fn read_vcc_decodes_supply_voltage() {
 }
 
 #[test]
+fn read_slot1_returns_typed_voltage_or_temperature() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0xA6, &[0x00, 0x7D]);
+
+    let mut client = LTC2949::new(mock);
+    let slot = client.read_slot1().unwrap();
+    assert_eq!(125, slot.raw());
+    assert!((slot.decode_voltage() - 0.046875).abs() < f32::EPSILON);
+    assert!((slot.decode_temperature() - 25.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn accumulated_result_types_decode_internal_clock_scaling() {
+    let charge = AccumulatedCharge::from_raw(1_000_000);
+    assert_eq!(1_000_000, charge.raw());
+    assert!((charge.decode() - 377.887e-6).abs() < f64::EPSILON);
+    assert!((charge.decode_coulombs(100e-6) - 3.77887).abs() < 1e-12);
+
+    let energy = AccumulatedEnergy::from_raw(1_000_000);
+    assert_eq!(1_000_000, energy.raw());
+    assert!((energy.decode() - 2.32175e-3).abs() < f64::EPSILON);
+    assert!((energy.decode_joules(100e-6) - 23.2175).abs() < 1e-12);
+
+    let time = AccumulatedTime::from_raw(1_000);
+    assert_eq!(1_000, time.raw());
+    assert!((time.decode() - 0.397777).abs() < f64::EPSILON);
+
+    let slot = SlotValue::from_raw(-100);
+    assert_eq!(-100, slot.raw());
+    assert!((slot.decode_voltage() + 0.0375).abs() < f32::EPSILON);
+    assert!((slot.decode_temperature() + 20.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn read_charge1_decodes_48bit_signed_be() {
     // 48-bit value 0x0000_0000_0001 = 1.
     let mut mock = MockSPIDevice::new();
@@ -624,7 +650,7 @@ fn read_charge1_decodes_48bit_signed_be() {
     expect_dcmd_read(&mut mock, 0x00, &[0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(1, client.read_charge1().unwrap());
+    assert_eq!(1, client.read_charge1().unwrap().raw());
 }
 
 #[test]
@@ -635,7 +661,7 @@ fn read_charge1_decodes_48bit_signed_negative() {
     expect_dcmd_read(&mut mock, 0x00, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(-1, client.read_charge1().unwrap());
+    assert_eq!(-1, client.read_charge1().unwrap().raw());
 }
 
 #[test]
@@ -647,7 +673,7 @@ fn read_charge3_decodes_64bit_signed() {
 
     let mut client = LTC2949::new(mock);
     let expected = i64::from_be_bytes(payload);
-    assert_eq!(expected, client.read_charge3().unwrap());
+    assert_eq!(expected, client.read_charge3().unwrap().raw());
 }
 
 #[test]
@@ -658,7 +684,7 @@ fn read_time1_decodes_32bit_unsigned_be() {
     expect_dcmd_read(&mut mock, 0x0C, &[0xDE, 0xAD, 0xBE, 0xEF]);
 
     let mut client = LTC2949::new(mock);
-    assert_eq!(0xDEAD_BEEF, client.read_time1().unwrap());
+    assert_eq!(0xDEAD_BEEF, client.read_time1().unwrap().raw());
 }
 
 #[test]
