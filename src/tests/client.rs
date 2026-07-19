@@ -43,6 +43,30 @@ const REGSCTRL_PAGE1: u8 = 0x81;
 /// `0x80 | 0x10 = 0x90`.
 const REGSCTRL_PAGE0_LOCK: u8 = 0x90;
 
+fn assert_f32_approx_eq(actual: f32, expected: f32) {
+    const ABSOLUTE_TOLERANCE: f32 = 1e-15;
+    const RELATIVE_TOLERANCE: f32 = 1e-6;
+
+    let difference = (actual - expected).abs();
+    let tolerance = ABSOLUTE_TOLERANCE.max(expected.abs() * RELATIVE_TOLERANCE);
+    assert!(
+        difference <= tolerance,
+        "expected {expected}, got {actual}; difference {difference} exceeds tolerance {tolerance}"
+    );
+}
+
+fn assert_f64_approx_eq(actual: f64, expected: f64) {
+    const ABSOLUTE_TOLERANCE: f64 = 1e-15;
+    const RELATIVE_TOLERANCE: f64 = 1e-12;
+
+    let difference = (actual - expected).abs();
+    let tolerance = ABSOLUTE_TOLERANCE.max(expected.abs() * RELATIVE_TOLERANCE);
+    assert!(
+        difference <= tolerance,
+        "expected {expected}, got {actual}; difference {difference} exceeds tolerance {tolerance}"
+    );
+}
+
 /// Constructs the exact byte sequence the driver should produce for a DCMD write of
 /// `data` to register `addr`.
 fn dcmd_write_bytes(addr: u8, data: &[u8]) -> Vec<u8> {
@@ -503,7 +527,7 @@ fn read_current1_decodes_24bit_signed_be() {
     let mut client = LTC2949::new(mock);
     let current = client.read_current1().unwrap();
     assert_eq!(-1, current.raw());
-    assert!((current.decode() - -950e-9).abs() < f32::EPSILON);
+    assert_f32_approx_eq(current.decode(), -950e-9);
 }
 
 #[test]
@@ -516,7 +540,7 @@ fn read_current1_positive_value() {
     let mut client = LTC2949::new(mock);
     let current = client.read_current1().unwrap();
     assert_eq!(0x000123, current.raw());
-    assert!((current.decode() - 0.00027645).abs() < f32::EPSILON);
+    assert_f32_approx_eq(current.decode(), 0.00027645);
 }
 
 #[test]
@@ -528,7 +552,7 @@ fn read_current1_avg_reads_moving_average_register() {
     let mut client = LTC2949::new(mock);
     let current = client.read_current1_avg().unwrap();
     assert_eq!(0x000400, current.raw());
-    assert!((current.decode() - 0.0002432).abs() < f32::EPSILON);
+    assert_f32_approx_eq(current.decode(), 0.0002432);
 }
 
 #[test]
@@ -540,7 +564,7 @@ fn read_current2_avg_decodes_24bit_signed_be() {
     let mut client = LTC2949::new(mock);
     let current = client.read_current2_avg().unwrap();
     assert_eq!(-512, current.raw());
-    assert!((current.decode() - -0.0001216).abs() < f32::EPSILON);
+    assert_f32_approx_eq(current.decode(), -0.0001216);
 }
 
 #[test]
@@ -552,8 +576,8 @@ fn read_power1_decodes_power_or_voltage_value() {
     let mut client = LTC2949::new(mock);
     let result = client.read_power1().unwrap();
     assert_eq!(0x000100, result.raw());
-    assert!((result.decode_voltage() - 0.012).abs() < f32::EPSILON);
-    assert!((result.decode_power(0.0001) - 0.000014942208).abs() < f32::EPSILON);
+    assert_f32_approx_eq(result.decode_voltage(), 0.012);
+    assert_f32_approx_eq(result.decode_power(0.0001), 0.000014942208);
 }
 
 #[test]
@@ -565,8 +589,8 @@ fn read_power2_decodes_24bit_signed_be() {
     let mut client = LTC2949::new(mock);
     let result = client.read_power2().unwrap();
     assert_eq!(-1, result.raw());
-    assert!((result.decode_voltage() - -46.875e-6).abs() < f32::EPSILON);
-    assert!((result.decode_power(1.0) - -5.8368e-12).abs() < f32::EPSILON);
+    assert_f32_approx_eq(result.decode_voltage(), -46.875e-6);
+    assert_f32_approx_eq(result.decode_power(1.0), -5.8368e-12);
 }
 
 #[test]
@@ -579,7 +603,7 @@ fn read_bat_decodes_16bit_signed_be() {
     let mut client = LTC2949::new(mock);
     let bat = client.read_bat().unwrap();
     assert_eq!(32767, bat.raw());
-    assert!((bat.decode() - 12.287625).abs() < f32::EPSILON);
+    assert_f32_approx_eq(bat.decode(), 12.287625);
 }
 
 #[test]
@@ -591,8 +615,8 @@ fn read_temp_decodes_kelvin_and_celsius() {
     let mut client = LTC2949::new(mock);
     let temp = client.read_temp().unwrap();
     assert_eq!(1492, temp.raw());
-    assert!((temp.decode_kelvin() - 298.4).abs() < f32::EPSILON);
-    assert!((temp.decode_celsius() - 25.25).abs() < f32::EPSILON);
+    assert_f32_approx_eq(temp.decode_kelvin(), 298.4);
+    assert_f32_approx_eq(temp.decode_celsius(), 25.25);
 }
 
 #[test]
@@ -604,7 +628,7 @@ fn read_vcc_decodes_supply_voltage() {
     let mut client = LTC2949::new(mock);
     let vcc = client.read_vcc().unwrap();
     assert_eq!(1000, vcc.raw());
-    assert!((vcc.decode() - 2.26).abs() < f32::EPSILON);
+    assert_f32_approx_eq(vcc.decode(), 2.26);
 }
 
 #[test]
@@ -616,30 +640,30 @@ fn read_slot1_returns_typed_voltage_or_temperature() {
     let mut client = LTC2949::new(mock);
     let slot = client.read_slot1().unwrap();
     assert_eq!(125, slot.raw());
-    assert!((slot.decode_voltage() - 0.046875).abs() < f32::EPSILON);
-    assert!((slot.decode_temperature() - 25.0).abs() < f32::EPSILON);
+    assert_f32_approx_eq(slot.decode_voltage(), 0.046875);
+    assert_f32_approx_eq(slot.decode_temperature(), 25.0);
 }
 
 #[test]
 fn accumulated_result_types_decode_internal_clock_scaling() {
     let charge = AccumulatedCharge::from_raw(1_000_000);
     assert_eq!(1_000_000, charge.raw());
-    assert!((charge.decode() - 377.887e-6).abs() < f64::EPSILON);
-    assert!((charge.decode_coulombs(100e-6) - 3.77887).abs() < 1e-12);
+    assert_f64_approx_eq(charge.decode(), 377.887e-6);
+    assert_f64_approx_eq(charge.decode_coulombs(100e-6), 3.77887);
 
     let energy = AccumulatedEnergy::from_raw(1_000_000);
     assert_eq!(1_000_000, energy.raw());
-    assert!((energy.decode() - 2.32175e-3).abs() < f64::EPSILON);
-    assert!((energy.decode_joules(100e-6) - 23.2175).abs() < 1e-12);
+    assert_f64_approx_eq(energy.decode(), 2.32175e-3);
+    assert_f64_approx_eq(energy.decode_joules(100e-6), 23.2175);
 
     let time = AccumulatedTime::from_raw(1_000);
     assert_eq!(1_000, time.raw());
-    assert!((time.decode() - 0.397777).abs() < f64::EPSILON);
+    assert_f64_approx_eq(time.decode(), 0.397777);
 
     let slot = SlotValue::from_raw(-100);
     assert_eq!(-100, slot.raw());
-    assert!((slot.decode_voltage() + 0.0375).abs() < f32::EPSILON);
-    assert!((slot.decode_temperature() + 20.0).abs() < f32::EPSILON);
+    assert_f32_approx_eq(slot.decode_voltage(), -0.0375);
+    assert_f32_approx_eq(slot.decode_temperature(), -20.0);
 }
 
 #[test]
