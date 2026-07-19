@@ -152,7 +152,7 @@
 //! // C1 · 377.887 ps · V / R_shunt (internal clock or 4 MHz crystal).
 //! let charge1 = client.read_charge1()?;       // AccumulatedCharge
 //! let coulombs = charge1.decode_coulombs(100e-6); // 100 µΩ shunt
-//! assert_eq!(0.0, coulombs);
+//! assert!((coulombs - 37.7887).abs() < 0.0001);
 //!
 //! // ---- Fast measurements synchronised with the cell monitors ----------
 //! // Configure channels 1 and 2 for fast single-shot, then broadcast ADCV

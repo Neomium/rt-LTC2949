@@ -1,7 +1,7 @@
 //! # LTC2949 direct-register client.
 //!
 //! This module contains the high-level [`Client`] trait, the concrete [`LTC2949`] client,
-//! register-oriented configuration types, raw result readers, and helper constants for
+//! register-oriented configuration types, result readers, and helper constants for
 //! host-owned timing.
 //!
 //! ## Timing
@@ -51,6 +51,144 @@
 //! );
 //! ```
 //!
+//! ## Fast control register
+//!
+//! [`Client::write_factrl`] selects which current and AUX channels participate in fast
+//! conversion. With `FACONV` set, conversions run continuously and place their results in the
+//! corresponding FIFOs. Leave `FACONV` clear when an ADCV-style command should trigger a
+//! single conversion instead.
+//!
+//! ```
+//! # use ltc2949::client::{Client, FastControlRegister, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let fast_channels = FastControlRegister::default()
+//!     .with_faconv(true)
+//!     .with_fach1(true)
+//!     .with_fach2(true);
+//!
+//! client.write_factrl(fast_channels).unwrap();
+//! ```
+//!
+//! ## ADC configuration register
+//!
+//! [`Client::write_adcconf`] configures power-result interpretation, NTC linearisation, and
+//! the NTC source used for shunt temperature compensation. The PAGE1 write becomes active
+//! only after an `ADJUPD` pulse while the LTC2949 is in STANDBY (`CONT = 0`).
+//!
+//! ```
+//! # use ltc2949::client::{AdcConfiguration, Client, LTC2949, OpsControlRegister};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let adc_configuration = AdcConfiguration::default()
+//!     .with_p1asv(true) // P1 contains a voltage result instead of power.
+//!     .with_ntc1(true); // SLOT1 contains the NTC1 temperature result.
+//!
+//! client.write_adcconf(adc_configuration).unwrap();
+//! client
+//!     .write_opctrl(OpsControlRegister::default().with_adjupd(true))
+//!     .unwrap();
+//! ```
+//!
+//! ## NTC coefficients
+//!
+//! [`Client::write_ntc_coefficients`] stores the reference resistor and Steinhart–Hart
+//! coefficients for either NTC channel as Float24 values. The coefficients below are a
+//! realistic 10 kΩ NTC configuration. Route the matching SLOT input, enable `NTC1` or `NTC2`
+//! in [`AdcConfiguration`], and issue `ADJUPD` before using the temperature result.
+//!
+//! ```
+//! # use ltc2949::client::{Channel, Client, LTC2949, NtcConfig};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let ntc = NtcConfig {
+//!     r_ref: 10_000.0,
+//!     a: 1.1382e-3,
+//!     b: 2.3267e-4,
+//!     c: 0.93243e-7,
+//! };
+//!
+//! client.write_ntc_coefficients(Channel::One, &ntc).unwrap();
+//! ```
+//!
+//! ## Sense-resistor temperature compensation
+//!
+//! [`Client::write_shunt_tc`] programs the linear and quadratic temperature coefficients and
+//! the nominal reference temperature for one sense resistor. This copper example uses
+//! 3900 ppm/K at 25 °C and no quadratic correction. The values become active after `ADJUPD`
+//! and require a configured NTC temperature source.
+//!
+//! ```
+//! # use ltc2949::client::{Channel, Client, LTC2949, ShuntTcConfig};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let copper_shunt = ShuntTcConfig {
+//!     tc: 0.0039,
+//!     t_ref: 25.0,
+//!     tc2: 0.0,
+//! };
+//!
+//! client.write_shunt_tc(Channel::One, &copper_shunt).unwrap();
+//! ```
+//!
+//! ## SLOT multiplexer configuration
+//!
+//! [`Client::write_slot_mux`] routes a negative and positive input to SLOT1 or SLOT2. A
+//! typical NTC divider connects its measurement node to `V1`; selecting `AGND` as `MUXN` and
+//! `V1` as `MUXP` measures that node single-ended for NTC1 linearisation.
+//!
+//! ```
+//! # use ltc2949::client::{Channel, Client, LTC2949, MuxInput};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//!
+//! client
+//!     .write_slot_mux(Channel::One, MuxInput::Agnd, MuxInput::V1)
+//!     .unwrap();
+//! ```
+//!
+//! ## GPIO control
+//!
+//! [`Client::write_gpio_ctrl`] writes the raw `FGPIOCTRL` byte, which contains four 2-bit GPIO
+//! control fields. In this example `GPIO1CTRL = 0b11` drives GPIO1 high while the remaining
+//! fields stay `0b00` (tristate).
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let gpio_control = 0b00_00_00_11;
+//!
+//! client.write_gpio_ctrl(gpio_control).unwrap();
+//! ```
+//!
+//! ## Overcurrent configuration
+//!
+//! [`Client::write_occ_config`] configures both hardware overcurrent comparators. Thresholds
+//! select a differential shunt voltage rather than amperes; divide by the shunt resistance
+//! to obtain the current limit. With a 100 µΩ shunt, the examples below correspond to +260 A
+//! and −520 A limits with 320 µs and 80 µs deglitch times.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949, OverCurrentConfig};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let positive_limit = OverCurrentConfig {
+//!     enable: true,
+//!     threshold: 0b001,    // 26 mV / 100 µΩ = 260 A
+//!     deglitch_time: 0b10, // 320 µs
+//!     polarity: 0b01,      // positive current only
+//! };
+//! let negative_limit = OverCurrentConfig {
+//!     enable: true,
+//!     threshold: 0b010,    // 52 mV / 100 µΩ = 520 A
+//!     deglitch_time: 0b01, // 80 µs
+//!     polarity: 0b10,      // negative current only
+//! };
+//!
+//! client.write_occ_config(positive_limit, negative_limit).unwrap();
+//! ```
+//!
 //! ## ADAX with an LTC681X chain
 //!
 //! The LTC2949 and the cell-monitor client need separate [`SpiDevice`] handles backed by
@@ -84,6 +222,192 @@
 //!
 //! // One broadcast starts the LTC2949 fast channels and all LTC6813 AUX conversions.
 //! meter.trigger_adax().unwrap();
+//! ```
+//!
+//! ## Status and fault monitoring
+//!
+//! [`Client::read_status`] returns the decoded `STATUS` register. Its accessors distinguish
+//! supply and reset events (`uvloa`, `pora`, `uvlostby`, `uvlod`), a completed result update,
+//! and ADC or time-base errors. The SPI transaction can still fail independently, so handle
+//! the returned [`Result`] before inspecting individual flags.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//!
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let status = client.read_status().unwrap();
+//!
+//! // The example device reports a nominal status with no conversion errors.
+//! assert!(!status.adcerr());
+//! assert!(!status.tberr());
+//! assert!(status.update()); // Result registers contain a new measurement cycle.
+//! ```
+//!
+//! [`Client::read_faults`] decodes the main `FAULTS` register into named hardware,
+//! communication, fast-acquisition, self-test, and CRC indicators. Check these flags after
+//! start-up and whenever `STATUS` reports an error; [`Client::read_extfaults`] provides the
+//! additional memory and fast-channel diagnostics from `EXTFAULTS`.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//!
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let faults = client.read_faults().unwrap();
+//!
+//! let configuration_is_valid = !faults.crccfg() && !faults.crcmem();
+//! let hardware_self_test_passed = !faults.hwbist();
+//! assert!(configuration_is_valid);
+//! assert!(hardware_self_test_passed);
+//! ```
+//!
+//! ## Current measurements
+//!
+//! [`Client::read_current1`] and [`Client::read_current2`] return the slow-mode voltage
+//! measured across the corresponding sense resistor. Divide the decoded voltage by the
+//! shunt resistance to obtain amperes. [`Client::read_current1_avg`] and
+//! [`Client::read_current2_avg`] expose the moving average of the four preceding measurements
+//! with a four-times finer LSB.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let shunt_ohms = 100e-6_f32;
+//!
+//! let current1 = client.read_current1().unwrap();
+//! let current2 = client.read_current2().unwrap();
+//! let current1_avg = client.read_current1_avg().unwrap();
+//! let current2_avg = client.read_current2_avg().unwrap();
+//!
+//! let current1_amps = current1.decode() / shunt_ohms;
+//! let current2_amps = current2.decode() / shunt_ohms;
+//! let current1_avg_amps = current1_avg.decode() / shunt_ohms;
+//! let current2_avg_amps = current2_avg.decode() / shunt_ohms;
+//! assert!((current1_amps - 9.5).abs() < 0.001);
+//! assert!((current2_amps + 4.75).abs() < 0.001);
+//! assert!((current1_avg_amps - 9.5).abs() < 0.001);
+//! assert!((current2_avg_amps + 4.75).abs() < 0.001);
+//! ```
+//!
+//! ## Power and battery voltage
+//!
+//! [`Client::read_power1`] and [`Client::read_power2`] return power-mode results by default.
+//! Decode them with the corresponding shunt resistance. If `P1ASV` or `P2ASV` is enabled in
+//! [`AdcConfiguration`], the same registers contain voltage instead and must be decoded with
+//! [`PowerOrVoltage::decode_voltage`]. [`Client::read_bat`] always returns the pack voltage.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let shunt_ohms = 100e-6_f32;
+//!
+//! let power1_watts = client.read_power1().unwrap().decode_power(shunt_ohms);
+//! let power2_watts = client.read_power2().unwrap().decode_power(shunt_ohms);
+//! let battery = client.read_bat().unwrap();
+//!
+//! assert!((power1_watts - 0.058_368).abs() < 0.000_001);
+//! assert!((power2_watts + 0.029_184).abs() < 0.000_001);
+//! assert_eq!(12_345, battery.raw());
+//! assert_eq!(4_629_375, (battery.decode() * 1_000_000.0) as i32);
+//! ```
+//!
+//! ## Temperature and supply voltage
+//!
+//! [`Client::read_temp`] provides the internal die temperature in kelvin or degrees Celsius.
+//! [`Client::read_vcc`] reports the shared analog/digital supply voltage. Both result types
+//! retain the raw register value and provide unit-aware decoding methods.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//!
+//! let die_temperature = client.read_temp().unwrap();
+//! let supply_voltage = client.read_vcc().unwrap();
+//!
+//! let temperature_celsius = die_temperature.decode_celsius();
+//! let vcc_volts = supply_voltage.decode();
+//! assert!((temperature_celsius - 25.05).abs() < 0.01);
+//! assert!((vcc_volts - 3.2996).abs() < 0.0001);
+//! ```
+//!
+//! ## Charge accumulators
+//!
+//! [`Client::read_charge1`] and [`Client::read_charge2`] read the signed 48-bit channel
+//! accumulators. [`Client::read_charge3`] reads the signed 64-bit weighted channel sum. For
+//! the internal clock or a 4 MHz crystal, [`AccumulatedCharge::decode_coulombs`] converts the
+//! raw value using the external shunt resistance; a freely configured external clock needs
+//! the scale from datasheet Table 27.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let shunt1_ohms = 100e-6_f64;
+//! let shunt2_ohms = 100e-6_f64;
+//!
+//! let charge1 = client.read_charge1().unwrap();
+//! let charge2 = client.read_charge2().unwrap();
+//! let charge3 = client.read_charge3().unwrap();
+//!
+//! let channel1_coulombs = charge1.decode_coulombs(shunt1_ohms);
+//! let channel2_coulombs = charge2.decode_coulombs(shunt2_ohms);
+//! // The weighted C3 sum uses the channel-1 shunt for conversion.
+//! let weighted_coulombs = charge3.decode_coulombs(shunt1_ohms);
+//! assert!((channel1_coulombs - 37.7887).abs() < 0.0001);
+//! assert!((channel2_coulombs + 22.67322).abs() < 0.0001);
+//! assert!((weighted_coulombs - 15.11548).abs() < 0.0001);
+//! ```
+//!
+//! ## Time-base accumulators
+//!
+//! [`Client::read_time1`] through [`Client::read_time4`] return unsigned 32-bit time-base
+//! counters. [`AccumulatedTime::decode`] converts them to seconds for the internal clock or a
+//! 4 MHz crystal; use the datasheet formula when the external clock is configured freely.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//!
+//! let time1 = client.read_time1().unwrap();
+//! let time2 = client.read_time2().unwrap();
+//! let time3 = client.read_time3().unwrap();
+//! let time4 = client.read_time4().unwrap();
+//!
+//! assert!((time1.decode() - 3.97777).abs() < 0.00001);
+//! assert!((time2.decode() - 4.773324).abs() < 0.00001);
+//! assert!((time3.decode() - 5.966655).abs() < 0.00001);
+//! assert!((time4.decode() - 7.95554).abs() < 0.00001);
+//! ```
+//!
+//! ## Coherent accumulator snapshots
+//!
+//! [`Client::read_accumulators1`] and [`Client::read_accumulators2`] each read charge,
+//! energy, and time in one 16-byte burst. Because all three values come from one register
+//! row, they form a coherent per-channel snapshot without a separate memory-lock handshake.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//!
+//! let channel1 = client.read_accumulators1().unwrap();
+//! let channel2 = client.read_accumulators2().unwrap();
+//!
+//! assert_eq!((10_000_000, 10_000, 10_000), (
+//!     channel1.charge.raw(),
+//!     channel1.energy.raw(),
+//!     channel1.time.raw(),
+//! ));
+//! assert_eq!((-6_000_000, -6_000, 12_000), (
+//!     channel2.charge.raw(),
+//!     channel2.energy.raw(),
+//!     channel2.time.raw(),
+//! ));
 //! ```
 //!
 // `modular-bitfield`'s macro expansion emits `pub field: (bool)` etc., which trips the
