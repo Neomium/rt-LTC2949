@@ -1324,6 +1324,12 @@ pub trait Client {
     /// Writes GPIO Control
     fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error>;
 
+    /// Writes GPIO5 Control Mode
+    fn write_gpio5_config(&mut self, config: u8) -> Result<(), Self::Error>;
+
+    /// Writes GPIO4 Heartbeat
+    fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error>;
+
     /// Writes both overcurrent-comparator control registers (`OCC1CTRL`/`OCC2CTRL`) in
     /// one PAGE0 burst. `config1` applies to channel 1; `config2` applies to channel 2.
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error>;
@@ -1569,6 +1575,18 @@ where
 
     fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
         self.write_bytes(RegAddressP0::FGpioCtrl, &[gpio])
+    }
+
+    fn write_gpio5_config(&mut self, config: u8) -> Result<(), Self::Error> {
+        self.write_bytes(RegAddressP0::FCurGpioCtrl, &[config])
+    }
+
+    fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error> {
+        if hb {
+            self.write_bytes(RegAddressP0::FCurGpioCtrl, &[0b1])
+        } else {
+            self.write_bytes(RegAddressP0::FCurGpioCtrl, &[0b0])
+        }
     }
 
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
