@@ -433,9 +433,6 @@ pub const T_READY_US: u32 = 20;
 /// STANDBY). Returned by [`Client::request_memory_lock`].
 pub const T_MLCK_US: u32 = 130_000;
 
-/// Fixed PECC field (datasheet Table 12): 16 data bytes per PEC group.
-const PECC: u8 = 15;
-
 /// Encoded ID byte carried by direct-command read and write frames (datasheet Table 12).
 pub(crate) struct DcmdId {
     /// `true` for a read command (`RW = 1`, `!RW = 0`), `false` for a write command.
@@ -469,9 +466,7 @@ impl From<DcmdId> for u8 {
         let p0 = id.pecc & 1;
         let rw = u8::from(id.read);
         let not_rw = rw ^ 1;
-        let bit5 = p3 ^ p2;
-        let bit2 = p1 ^ p0;
-        (rw << 7) | (not_rw << 6) | (bit5 << 5) | (p3 << 4) | (p2 << 3) | (bit2 << 2) | (p1 << 1) | p0
+        (rw << 7) | (not_rw << 6) | ((p3 ^ p2) << 5) | (p3 << 4) | (p2 << 3) | ((p1 ^ p0) << 2) | (p1 << 1) | p0
     }
 }
 
@@ -1879,7 +1874,10 @@ where
     /// covered by a PEC.
     fn dcmd_write(&mut self, addr: u8, data: &[u8]) -> Result<(), Error<B>> {
         // Frame: 4 (header+PEC) + 1 (ID) + ≤16 (data) + 2 (PEC) = 23 bytes max.
-        debug_assert!(data.len() <= N_PER_PEC, "DCMD write exceeds one PEC group");
+        assert!(
+            (1..=N_PER_PEC).contains(&data.len()),
+            "DCMD write requires 1 to 16 data bytes"
+        );
 
         let mut frame = [0u8; 23];
         frame[0] = 0xFE;
@@ -1887,9 +1885,8 @@ where
         let header_pec = PEC15::calc(&frame[0..2]);
         frame[2] = header_pec[0];
         frame[3] = header_pec[1];
-        frame[4] = DcmdId::write(PECC).into();
-
         let n = data.len();
+        frame[4] = DcmdId::write((n - 1) as u8).into();
         frame[5..5 + n].copy_from_slice(data);
         let data_pec = PEC15::calc(&frame[5..5 + n]);
         frame[5 + n] = data_pec[0];
@@ -1906,7 +1903,10 @@ where
     /// Direct `DCMD` read: data appears on MISO after the 5-byte header, then the PEC.
     /// `buf` must fit one PEC group (≤ 16 bytes); the 16-byte accumulator row is the largest.
     fn dcmd_read(&mut self, addr: u8, buf: &mut [u8]) -> Result<(), Error<B>> {
-        debug_assert!(buf.len() <= N_PER_PEC, "DCMD read exceeds one PEC group");
+        assert!(
+            (1..=N_PER_PEC).contains(&buf.len()),
+            "DCMD read requires 1 to 16 data bytes"
+        );
 
         let n = buf.len();
         // MOSI: header (4) + ID (1) + n dummy data bytes + 2 dummy PEC bytes.
@@ -1919,7 +1919,7 @@ where
         let header_pec = PEC15::calc(&mosi[0..2]);
         mosi[2] = header_pec[0];
         mosi[3] = header_pec[1];
-        mosi[4] = DcmdId::read(PECC).into();
+        mosi[4] = DcmdId::read((n - 1) as u8).into();
         // bytes 5..5+n and the trailing PEC bytes stay 0xFF (don't-care on MOSI).
 
         let total = 5 + n + 2;

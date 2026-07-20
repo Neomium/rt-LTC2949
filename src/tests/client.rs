@@ -8,8 +8,9 @@
 //!
 //! Framing checked here:
 //! * **DCMD writes** — `[0xFE, RADDR, PEC0, PEC1, ID, D0..Dn-1, DPEC0, DPEC1]` with
-//!   `ID = 0x5B` for PECC=15 (write).
-//! * **DCMD reads** — `[0xFE, RADDR, PEC0, PEC1, ID=0x9B, <dummy>]` on MOSI, with the
+//!   the ID's PECC field set to `n - 1`.
+//! * **DCMD reads** — `[0xFE, RADDR, PEC0, PEC1, ID, <dummy>]` on MOSI, with PECC set
+//!   to `n - 1` and the
 //!   slave's `[D0..Dn-1, DPEC0, DPEC1]` appearing on MISO after the 5-byte header.
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
@@ -24,13 +25,6 @@ use crate::pec15::PEC15;
 use alloc::vec;
 use alloc::vec::Vec;
 use embedded_hal::spi::Operation;
-
-/// ID byte for DCMD writes with PECC=15 (16 data bytes per PEC group). Datasheet
-/// Table 12 — bit 7 RW=0, bit 6 !RW=1, PECC=0b1111 → 0b0101_1011.
-const DCMD_ID_WRITE: u8 = 0x5B;
-
-/// ID byte for DCMD reads with PECC=15 — bit 7 RW=1, bit 6 !RW=0 → 0b1001_1011.
-const DCMD_ID_READ: u8 = 0x9B;
 
 /// REGSCTRL bytes written by `select_page` in the parallel topology. RDCVCONF=1
 /// (bit 7), BCREN=0, PAGE selects the page (bit 0):
@@ -70,13 +64,14 @@ fn assert_f64_approx_eq(actual: f64, expected: f64) {
 /// Constructs the exact byte sequence the driver should produce for a DCMD write of
 /// `data` to register `addr`.
 fn dcmd_write_bytes(addr: u8, data: &[u8]) -> Vec<u8> {
+    assert!((1..=16).contains(&data.len()));
     let mut v = Vec::with_capacity(7 + data.len());
     v.push(0xFE);
     v.push(addr);
     let header_pec = PEC15::calc(&[0xFE, addr]);
     v.push(header_pec[0]);
     v.push(header_pec[1]);
-    v.push(DCMD_ID_WRITE);
+    v.push(make_id(false, (data.len() - 1) as u8));
     v.extend_from_slice(data);
     let data_pec = PEC15::calc(data);
     v.push(data_pec[0]);
@@ -100,6 +95,7 @@ fn f24_high(value: f32) -> [u8; 2] {
 /// * MISO: `[_, _, _, _, _, D0…D(n-1), dpec0, dpec1]` — first five bytes are ignored by
 ///   the driver (the command echo region); the data and its PEC follow.
 fn dcmd_read_frames(addr: u8, data: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    assert!((1..=16).contains(&data.len()));
     let n = data.len();
     let total = 5 + n + 2;
 
@@ -109,7 +105,7 @@ fn dcmd_read_frames(addr: u8, data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let hpec = PEC15::calc(&[0xFE, addr]);
     tx[2] = hpec[0];
     tx[3] = hpec[1];
-    tx[4] = DCMD_ID_READ;
+    tx[4] = make_id(true, (n - 1) as u8);
 
     let mut rx = vec![0u8; total];
     rx[5..5 + n].copy_from_slice(data);
@@ -181,8 +177,7 @@ fn expect_select_page(mock: &mut MockSPIDevice, page1: bool) {
 }
 
 /// Computes a DCMD ID byte from the read/write flag and the PECC field, mirroring
-/// the formula in [`crate::client`]. Used here only as a self-contained witness
-/// that our `DCMD_ID_WRITE` constant matches the datasheet encoding.
+/// the formula in [`crate::client`].
 fn make_id(read: bool, pecc: u8) -> u8 {
     let pecc = pecc & 0x0F;
     let p3 = (pecc >> 3) & 1;
@@ -202,11 +197,10 @@ fn id_byte_read_pecc15_is_0x9b() {
     assert_eq!(0x9B, make_id(true, 15));
 }
 
-/// Write with PECC=15 (the value the driver uses) should yield 0x5B, matching
-/// `DCMD_ID_WRITE`.
+/// Write with PECC=15 should yield 0x5B.
 #[test]
-fn id_byte_write_pecc15_matches_driver_constant() {
-    assert_eq!(DCMD_ID_WRITE, make_id(false, 15));
+fn id_byte_write_pecc15_is_0x5b() {
+    assert_eq!(0x5B, make_id(false, 15));
 }
 
 /// Write with PECC=1 (2 data bytes per PEC) should yield 0x45 — matches the
@@ -525,8 +519,8 @@ fn write_opctrl_then_write_factrl_only_selects_page_once() {
 #[test]
 fn read_uses_dcmd_read_frame_with_read_id() {
     // Verify the exact MOSI frame of a direct DCMD read: command header + read ID
-    // (0x9B) + don't-care padding. This is the defining behaviour of the parallel
-    // topology (vs. the broadcast-RDCV path used when on top of a chain).
+    // (0x80 for one data byte) + don't-care padding. This is the defining behaviour
+    // of the parallel topology (vs. the broadcast-RDCV path used when on top of a chain).
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
 
@@ -534,7 +528,7 @@ fn read_uses_dcmd_read_frame_with_read_id() {
     let (tx, rx) = dcmd_read_frames(0x80, &[0xA5]);
     assert_eq!(0xFE, tx[0]);
     assert_eq!(0x80, tx[1]);
-    assert_eq!(DCMD_ID_READ, tx[4]); // read ID, not write
+    assert_eq!(0x80, tx[4]); // read ID with PECC=0 (one data byte)
     expect_transfer(&mut mock, tx, rx);
 
     let mut client = LTC2949::new(mock);
