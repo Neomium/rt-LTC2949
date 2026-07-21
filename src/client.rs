@@ -262,6 +262,58 @@
 //! assert!(hardware_self_test_passed);
 //! ```
 //!
+//! ## Threshold monitoring
+//!
+//! The alert readers decode the PAGE0 threshold and overflow status registers into named
+//! flags. [`Client::read_vt_alerts`] covers battery voltage, temperature, and the two slow
+//! AUX slots; [`Client::read_ip_alerts`] covers current and power; and
+//! [`Client::read_c_alerts`] covers accumulated charge. [`Client::read_ceof_alerts`],
+//! [`Client::read_tb_alerts`], and [`Client::read_vcc_alerts`] report accumulator overflow,
+//! time-base, supply, and overcurrent-comparator alerts.
+//!
+//! Alert bits are sticky read/write flags. Follow the datasheet's memory-lock procedure
+//! before clearing alert registers so that an alert arriving during the clear is not lost.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//!
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let vt_alerts = client.read_vt_alerts().unwrap();
+//!
+//! // The example device reports a nominal status with no thresholds exceeded.
+//! assert!(!vt_alerts.bath());
+//! assert!(!vt_alerts.temph());
+//! assert!(!vt_alerts.slot1h());
+//! ```
+//!
+//! PAGE1 threshold setters accept physical SI values and round to the nearest register code
+//! using the scales in datasheet Tables 26–28. Current, power, charge, and energy setters
+//! also take the shunt resistance so callers can use amperes, watts, coulombs, and joules
+//! instead of the IC's intermediate V/V² units. Values that do not fit return
+//! [`Error::InvalidThreshold`].
+//!
+//! ```
+//! # use ltc2949::client::{AccumulatorClock, ChargeAccumulator, Channel, Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let shunt_ohms = 100e-6;
+//!
+//! client
+//!     .write_current_thresholds(Channel::One, -100.0, 100.0, shunt_ohms)
+//!     .unwrap();
+//! client.write_battery_thresholds(0.0, 10.0).unwrap();
+//! client
+//!     .write_charge_thresholds(
+//!         ChargeAccumulator::Charge1,
+//!         -100.0,
+//!         100.0,
+//!         shunt_ohms as f64,
+//!         AccumulatorClock::Internal,
+//!     )
+//!     .unwrap();
+//! ```
+//!
 //! ## Current measurements
 //!
 //! [`Client::read_current1`] and [`Client::read_current2`] return the slow-mode voltage
@@ -502,6 +554,13 @@ pub enum RegAddressP0 {
     Time4 = 0x3C,
     WkupAck = 0x70,
     Status = 0x80,
+    StatVT = 0x81,
+    StatIP = 0x82,
+    StatC = 0x83,
+    StatE = 0x84,
+    StatCEOF = 0x85,
+    StatTB = 0x86,
+    StatVCC = 0x87,
     Current1 = 0x90, // 24-bit signed
     Power1 = 0x93,
     Current2 = 0x96,
@@ -538,11 +597,46 @@ pub enum RegAddressP0 {
     RegsCtrl = 0xFF,
 }
 
-/// Page-1 register addresses: ADC config plus the NTC-linearisation and sense-resistor
-/// TC coefficient blocks (datasheet Tables 69, 71, 76). Discriminant = on-bus `RADDR` byte.
+/// Page-1 register addresses: thresholds, ADC config, NTC-linearisation, and sense-resistor
+/// TC coefficient blocks (datasheet Tables 67, 69, 71, 76). Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum RegAddressP1 {
+    // Threshold Registers
+    C1Th = 0x00,
+    C1Tl = 0x06,
+    Tb1Th = 0x0C,
+    E1Th = 0x10,
+    E1Tl = 0x16,
+    C2Th = 0x20,
+    C2Tl = 0x26,
+    Tb2Th = 0x2C,
+    E2Th = 0x30,
+    E2Tl = 0x36,
+    C3Th = 0x44,
+    Tb3Th = 0x4C,
+    C3Tl = 0x54,
+    E4Th = 0x64,
+    Tb4Th = 0x6C,
+    E4Tl = 0x74,
+    I1Th = 0x80,
+    I1Tl = 0x82,
+    P1Th = 0x84,
+    P1Tl = 0x86,
+    I2Th = 0x88,
+    I2Tl = 0x8A,
+    P2Th = 0x8C,
+    P2Tl = 0x8E,
+    BatTh = 0x90,
+    BatTl = 0x92,
+    TempTh = 0x94,
+    TempTl = 0x96,
+    VccTh = 0x98,
+    VccTl = 0x9A,
+    Slot1Th = 0xA0,
+    Slot1Tl = 0xA2,
+    Slot2Th = 0xA4,
+    Slot2Tl = 0xA6,
     // 2nd-order sense-resistor TC (3 bytes Float24 each), tucked low on the page.
     Rs1Tc2 = 0x5C,
     Rs2Tc2 = 0x7C,
@@ -870,6 +964,51 @@ pub struct AccumulatedTime {
     raw: u32,
 }
 
+/// Charge accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ChargeAccumulator {
+    Charge1,
+    Charge2,
+    /// Weighted sum of channels 1 and 2; its SI conversion uses the channel-1 shunt.
+    Charge3,
+}
+
+/// Energy accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum EnergyAccumulator {
+    Energy1,
+    Energy2,
+    /// Weighted sum of channels 1 and 2; its SI conversion uses the channel-1 shunt.
+    Energy4,
+}
+
+/// Time-base accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TimeBase {
+    Time1,
+    Time2,
+    Time3,
+    Time4,
+}
+
+/// Clock configuration used to scale accumulated charge, energy, and time thresholds.
+///
+/// [`Internal`](Self::Internal) also covers a 4 MHz crystal with the datasheet's `PRE = 2`,
+/// `DIV = 30` settings (Table 26). The external-clock formula follows Table 27.
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
+pub enum AccumulatorClock {
+    #[default]
+    Internal,
+    External {
+        /// External clock frequency in hertz.
+        frequency_hz: f64,
+        /// PRE field value (0–7).
+        pre: u8,
+        /// DIV field value (0–31).
+        div: u8,
+    },
+}
+
 impl AccumulatedTime {
     /// Seconds represented by one raw code with the internal clock or a 4 MHz crystal.
     pub const LSB_SECONDS: f64 = 397.777e-6;
@@ -1078,6 +1217,140 @@ pub struct StatusRegister {
     __: B1,
 }
 
+/// Voltage, Temperature Threshold Alerts register (PAGE0, 0x81; datasheet Table 35).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct VTAlerts {
+    /// BATH: voltage (VBATP – VBATM) high threshold exceeded.
+    pub bath: bool,
+    /// BATL: voltage (VBATP – VBATM) low threshold exceeded.
+    pub batl: bool,
+    /// TEMPH: temperature high threshold exceeded.
+    pub temph: bool,
+    /// TEMPL: temperature low threshold exceeded.
+    pub templ: bool,
+    /// SLOT1H: SLOT1 high threshold exceeded.
+    pub slot1h: bool,
+    /// SLOT1L: SLOT1 low threshold exceeded.
+    pub slot1l: bool,
+    /// SLOT2H: SLOT2 high threshold exceeded.
+    pub slot2h: bool,
+    /// SLOT2L: SLOT2 low threshold exceeded.
+    pub slot2l: bool,
+}
+
+/// Current and power threshold alerts (STATIP, PAGE0, 0x82; datasheet Table 36).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct IPAlerts {
+    /// I1H: Current1 high threshold exceeded.
+    pub i1h: bool,
+    /// I1L: Current1 low threshold exceeded.
+    pub i1l: bool,
+    /// P1H: Power1 high threshold exceeded.
+    pub p1h: bool,
+    /// P1L: Power1 low threshold exceeded.
+    pub p1l: bool,
+    /// I2H: Current2 high threshold exceeded.
+    pub i2h: bool,
+    /// I2L: Current2 low threshold exceeded.
+    pub i2l: bool,
+    /// P2H: Power2 high threshold exceeded.
+    pub p2h: bool,
+    /// P2L: Power2 low threshold exceeded.
+    pub p2l: bool,
+}
+
+/// Charge threshold alerts (STATC, PAGE0, 0x83; datasheet Table 37).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CAlerts {
+    /// C1H: Charge1 high threshold exceeded.
+    pub c1h: bool,
+    /// C1L: Charge1 low threshold exceeded.
+    pub c1l: bool,
+    /// C2H: Charge2 high threshold exceeded.
+    pub c2h: bool,
+    /// C2L: Charge2 low threshold exceeded.
+    pub c2l: bool,
+    /// C3H: Charge3 high threshold exceeded.
+    pub c3h: bool,
+    /// C3L: Charge3 low threshold exceeded.
+    pub c3l: bool,
+    // Reserved bits 6–7.
+    #[skip]
+    __: B2,
+}
+
+/// Charge and energy overflow alerts (STATCEOF, PAGE0, 0x85; datasheet Table 39).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CEOFAlerts {
+    /// C1OVF: Charge1 accumulator overflowed.
+    pub c1ovf: bool,
+    /// C2OVF: Charge2 accumulator overflowed.
+    pub c2ovf: bool,
+    /// C3OVF: Charge3 accumulator overflowed.
+    pub c3ovf: bool,
+    // Reserved bit 3.
+    #[skip]
+    __: B1,
+    /// E1OVF: Energy1 accumulator overflowed.
+    pub e1ovf: bool,
+    /// E2OVF: Energy2 accumulator overflowed.
+    pub e2ovf: bool,
+    // Reserved bit 6.
+    #[skip]
+    __: B1,
+    /// E4OVF: Energy4 accumulator overflowed.
+    pub e4ovf: bool,
+}
+
+/// Time-base threshold and overflow alerts (STATTB, PAGE0, 0x86; datasheet Table 40).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct TBAlerts {
+    /// T1TH: Time1 threshold exceeded.
+    pub t1th: bool,
+    /// T2TH: Time2 threshold exceeded.
+    pub t2th: bool,
+    /// T3TH: Time3 threshold exceeded.
+    pub t3th: bool,
+    /// T4TH: Time4 threshold exceeded.
+    pub t4th: bool,
+    /// T1OVF: Time1 overflowed.
+    pub t1ovf: bool,
+    /// T2OVF: Time2 overflowed.
+    pub t2ovf: bool,
+    /// T3OVF: Time3 overflowed.
+    pub t3ovf: bool,
+    /// T4OVF: Time4 overflowed.
+    pub t4ovf: bool,
+}
+
+/// VCC and overcurrent-comparator alerts (STATVCC, PAGE0, 0x87; datasheet Table 41).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct VCCAlerts {
+    /// VCCH: VCC high threshold exceeded.
+    pub vcch: bool,
+    /// VCCL: VCC low threshold exceeded.
+    pub vccl: bool,
+    /// OCC1H: Current1 remained above the OCC1 threshold for longer than its deglitch time.
+    pub occ1h: bool,
+    /// OCC2H: Current2 remained above the OCC2 threshold for longer than its deglitch time.
+    pub occ2h: bool,
+    // Reserved bits 4–7.
+    #[skip]
+    __: B4,
+}
+
 /// Fault register (PAGE0, 0xDD; datasheet Table 28).
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -1264,6 +1537,9 @@ pub enum Error<B: SpiDevice<u8>> {
     BusError(B::Error),
     /// A returned PEC did not match the calculated value.
     ChecksumMismatch,
+    /// A threshold was non-finite, used an invalid clock/shunt configuration, had its low
+    /// bound above its high bound, or did not fit in the corresponding Table 67 register.
+    InvalidThreshold,
 }
 
 impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
@@ -1271,6 +1547,7 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
         match self {
             Error::BusError(_) => f.debug_struct("BusError").finish(),
             Error::ChecksumMismatch => f.debug_struct("ChecksumMismatch").finish(),
+            Error::InvalidThreshold => f.debug_struct("InvalidThreshold").finish(),
         }
     }
 }
@@ -1306,6 +1583,91 @@ pub trait Client {
     /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
     fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Self::Error>;
 
+    /// Writes the low and high threshold for C1, C2, or C3 (Table 67), converting coulombs
+    /// with `shunt_ohms` and the selected accumulator clock. C3 uses the channel-1 shunt.
+    fn write_charge_thresholds(
+        &mut self,
+        accumulator: ChargeAccumulator,
+        low_coulombs: f64,
+        high_coulombs: f64,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes the low and high threshold for E1, E2, or E4 (Table 67), converting joules
+    /// with `shunt_ohms` and the selected accumulator clock. E4 uses the channel-1 shunt.
+    fn write_energy_thresholds(
+        &mut self,
+        accumulator: EnergyAccumulator,
+        low_joules: f64,
+        high_joules: f64,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a TB1–TB4 high threshold in seconds (Table 67).
+    fn write_time_threshold(
+        &mut self,
+        time_base: TimeBase,
+        seconds: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes an I1/I2 low/high threshold pair in amperes. `shunt_ohms` converts the
+    /// requested current to the differential shunt voltage represented by the register.
+    fn write_current_thresholds(
+        &mut self,
+        channel: Channel,
+        low_amperes: f32,
+        high_amperes: f32,
+        shunt_ohms: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a power-mode P1/P2 low/high threshold pair in watts. Use this when the
+    /// corresponding `PxASV` bit is clear.
+    fn write_power_thresholds(
+        &mut self,
+        channel: Channel,
+        low_watts: f32,
+        high_watts: f32,
+        shunt_ohms: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a voltage-mode P1/P2 low/high threshold pair in volts. Use this when the
+    /// corresponding `PxASV` bit is set.
+    fn write_power_as_voltage_thresholds(
+        &mut self,
+        channel: Channel,
+        low_volts: f32,
+        high_volts: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes the BAT low/high threshold pair in volts.
+    fn write_battery_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Self::Error>;
+
+    /// Writes the die-temperature low/high threshold pair in degrees Celsius.
+    fn write_temperature_thresholds(&mut self, low_celsius: f32, high_celsius: f32) -> Result<(), Self::Error>;
+
+    /// Writes the A/DVCC low/high threshold pair in volts.
+    fn write_vcc_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Self::Error>;
+
+    /// Writes a SLOT1/SLOT2 low/high threshold pair in volts (corresponding `NTCx` clear).
+    fn write_slot_voltage_thresholds(
+        &mut self,
+        slot: Channel,
+        low_volts: f32,
+        high_volts: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a SLOT1/SLOT2 low/high threshold pair in degrees Celsius
+    /// (corresponding `NTCx` set).
+    fn write_slot_temperature_thresholds(
+        &mut self,
+        slot: Channel,
+        low_celsius: f32,
+        high_celsius: f32,
+    ) -> Result<(), Self::Error>;
+
     /// Writes the Fast AUX mux selection (FAMUXP, FAMUXN).
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Self::Error>;
 
@@ -1336,6 +1698,29 @@ pub trait Client {
 
     /// Reads and decodes the STATUS register (PAGE0, 0x80; datasheet Table 26).
     fn read_status(&mut self) -> Result<StatusRegister, Self::Error>;
+
+    /// Reads voltage, temperature, and SLOT threshold alerts (STATVT, PAGE0, 0x81;
+    /// datasheet Table 35). Set bits indicate that the corresponding high or low threshold
+    /// was exceeded; the flags are sticky read/write bits.
+    fn read_vt_alerts(&mut self) -> Result<VTAlerts, Self::Error>;
+
+    /// Reads current and power threshold alerts (STATIP, PAGE0, 0x82; datasheet Table 36).
+    fn read_ip_alerts(&mut self) -> Result<IPAlerts, Self::Error>;
+
+    /// Reads accumulated-charge threshold alerts (STATC, PAGE0, 0x83; datasheet Table 37).
+    fn read_c_alerts(&mut self) -> Result<CAlerts, Self::Error>;
+
+    /// Reads charge and energy accumulator overflow alerts (STATCEOF, PAGE0, 0x85;
+    /// datasheet Table 39).
+    fn read_ceof_alerts(&mut self) -> Result<CEOFAlerts, Self::Error>;
+
+    /// Reads time-base threshold and overflow alerts (STATTB, PAGE0, 0x86;
+    /// datasheet Table 40).
+    fn read_tb_alerts(&mut self) -> Result<TBAlerts, Self::Error>;
+
+    /// Reads VCC threshold and overcurrent-comparator alerts (STATVCC, PAGE0, 0x87;
+    /// datasheet Table 41).
+    fn read_vcc_alerts(&mut self) -> Result<VCCAlerts, Self::Error>;
 
     /// Reads and decodes the FAULTS register (PAGE0, 0xDD; datasheet Table 28).
     fn read_faults(&mut self) -> Result<FaultsRegister, Self::Error>;
@@ -1522,6 +1907,188 @@ where
         self.write_bytes(RegAddressP1::AdcConf, &value.into_bytes())
     }
 
+    fn write_charge_thresholds(
+        &mut self,
+        accumulator: ChargeAccumulator,
+        low_coulombs: f64,
+        high_coulombs: f64,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (charge_lsb, _, _) = Self::accumulator_lsbs(clock)?;
+        let lsb_coulombs = Self::divide_lsb_by_shunt(charge_lsb, shunt_ohms)?;
+        match accumulator {
+            ChargeAccumulator::Charge1 => {
+                self.write_signed_48_threshold_pair(RegAddressP1::C1Th, low_coulombs, high_coulombs, lsb_coulombs)
+            }
+            ChargeAccumulator::Charge2 => {
+                self.write_signed_48_threshold_pair(RegAddressP1::C2Th, low_coulombs, high_coulombs, lsb_coulombs)
+            }
+            ChargeAccumulator::Charge3 => self.write_signed_64_threshold_pair(
+                RegAddressP1::C3Th,
+                RegAddressP1::C3Tl,
+                low_coulombs,
+                high_coulombs,
+                lsb_coulombs,
+            ),
+        }
+    }
+
+    fn write_energy_thresholds(
+        &mut self,
+        accumulator: EnergyAccumulator,
+        low_joules: f64,
+        high_joules: f64,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (_, energy_lsb, _) = Self::accumulator_lsbs(clock)?;
+        let lsb_joules = Self::divide_lsb_by_shunt(energy_lsb, shunt_ohms)?;
+        match accumulator {
+            EnergyAccumulator::Energy1 => {
+                self.write_signed_48_threshold_pair(RegAddressP1::E1Th, low_joules, high_joules, lsb_joules)
+            }
+            EnergyAccumulator::Energy2 => {
+                self.write_signed_48_threshold_pair(RegAddressP1::E2Th, low_joules, high_joules, lsb_joules)
+            }
+            EnergyAccumulator::Energy4 => self.write_signed_64_threshold_pair(
+                RegAddressP1::E4Th,
+                RegAddressP1::E4Tl,
+                low_joules,
+                high_joules,
+                lsb_joules,
+            ),
+        }
+    }
+
+    fn write_time_threshold(
+        &mut self,
+        time_base: TimeBase,
+        seconds: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (_, _, time_lsb) = Self::accumulator_lsbs(clock)?;
+        let raw = Self::quantize_unsigned_32(seconds, time_lsb)?;
+        let address = match time_base {
+            TimeBase::Time1 => RegAddressP1::Tb1Th,
+            TimeBase::Time2 => RegAddressP1::Tb2Th,
+            TimeBase::Time3 => RegAddressP1::Tb3Th,
+            TimeBase::Time4 => RegAddressP1::Tb4Th,
+        };
+        self.write_bytes(address, &raw.to_be_bytes())
+    }
+
+    fn write_current_thresholds(
+        &mut self,
+        channel: Channel,
+        low_amperes: f32,
+        high_amperes: f32,
+        shunt_ohms: f32,
+    ) -> Result<(), Error<B>> {
+        let lsb_amperes = Self::divide_lsb_by_shunt(CurrentSenseVoltage::LSB_VOLTS as f64, shunt_ohms as f64)?;
+        let address = match channel {
+            Channel::One => RegAddressP1::I1Th,
+            Channel::Two => RegAddressP1::I2Th,
+        };
+        self.write_signed_16_threshold_pair(address, low_amperes as f64, high_amperes as f64, lsb_amperes)
+    }
+
+    fn write_power_thresholds(
+        &mut self,
+        channel: Channel,
+        low_watts: f32,
+        high_watts: f32,
+        shunt_ohms: f32,
+    ) -> Result<(), Error<B>> {
+        let lsb_watts = Self::divide_lsb_by_shunt(PowerOrVoltage::POWER_LSB_VOLT_SQUARED as f64, shunt_ohms as f64)?;
+        let address = match channel {
+            Channel::One => RegAddressP1::P1Th,
+            Channel::Two => RegAddressP1::P2Th,
+        };
+        self.write_signed_16_threshold_pair(address, low_watts as f64, high_watts as f64, lsb_watts)
+    }
+
+    fn write_power_as_voltage_thresholds(
+        &mut self,
+        channel: Channel,
+        low_volts: f32,
+        high_volts: f32,
+    ) -> Result<(), Error<B>> {
+        let address = match channel {
+            Channel::One => RegAddressP1::P1Th,
+            Channel::Two => RegAddressP1::P2Th,
+        };
+        self.write_signed_16_threshold_pair(
+            address,
+            low_volts as f64,
+            high_volts as f64,
+            PowerOrVoltage::VOLTAGE_LSB_VOLTS as f64,
+        )
+    }
+
+    fn write_battery_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Error<B>> {
+        self.write_signed_16_threshold_pair(
+            RegAddressP1::BatTh,
+            low_volts as f64,
+            high_volts as f64,
+            BatteryVoltage::LSB_VOLTS as f64,
+        )
+    }
+
+    fn write_temperature_thresholds(&mut self, low_celsius: f32, high_celsius: f32) -> Result<(), Error<B>> {
+        self.write_signed_16_threshold_pair(
+            RegAddressP1::TempTh,
+            (low_celsius + DieTemperature::ZERO_CELSIUS_KELVIN) as f64,
+            (high_celsius + DieTemperature::ZERO_CELSIUS_KELVIN) as f64,
+            DieTemperature::LSB_KELVIN as f64,
+        )
+    }
+
+    fn write_vcc_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Error<B>> {
+        self.write_signed_16_threshold_pair(
+            RegAddressP1::VccTh,
+            low_volts as f64,
+            high_volts as f64,
+            SupplyVoltage::LSB_VOLTS as f64,
+        )
+    }
+
+    fn write_slot_voltage_thresholds(
+        &mut self,
+        slot: Channel,
+        low_volts: f32,
+        high_volts: f32,
+    ) -> Result<(), Error<B>> {
+        let address = match slot {
+            Channel::One => RegAddressP1::Slot1Th,
+            Channel::Two => RegAddressP1::Slot2Th,
+        };
+        self.write_signed_16_threshold_pair(
+            address,
+            low_volts as f64,
+            high_volts as f64,
+            SlotValue::LSB_VOLTS as f64,
+        )
+    }
+
+    fn write_slot_temperature_thresholds(
+        &mut self,
+        slot: Channel,
+        low_celsius: f32,
+        high_celsius: f32,
+    ) -> Result<(), Error<B>> {
+        let address = match slot {
+            Channel::One => RegAddressP1::Slot1Th,
+            Channel::Two => RegAddressP1::Slot2Th,
+        };
+        self.write_signed_16_threshold_pair(
+            address,
+            low_celsius as f64,
+            high_celsius as f64,
+            SlotValue::LSB_DEGREES_CELSIUS as f64,
+        )
+    }
+
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Error<B>> {
         self.write_bytes(RegAddressP0::FaMuxN, &[mux_n, mux_p])
     }
@@ -1603,6 +2170,42 @@ where
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::Status, &mut buf)?;
         Ok(StatusRegister::from_bytes(buf))
+    }
+
+    fn read_vt_alerts(&mut self) -> Result<VTAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatVT, &mut buf)?;
+        Ok(VTAlerts::from_bytes(buf))
+    }
+
+    fn read_ip_alerts(&mut self) -> Result<IPAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatIP, &mut buf)?;
+        Ok(IPAlerts::from_bytes(buf))
+    }
+
+    fn read_c_alerts(&mut self) -> Result<CAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatC, &mut buf)?;
+        Ok(CAlerts::from_bytes(buf))
+    }
+
+    fn read_ceof_alerts(&mut self) -> Result<CEOFAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatCEOF, &mut buf)?;
+        Ok(CEOFAlerts::from_bytes(buf))
+    }
+
+    fn read_tb_alerts(&mut self) -> Result<TBAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatTB, &mut buf)?;
+        Ok(TBAlerts::from_bytes(buf))
+    }
+
+    fn read_vcc_alerts(&mut self) -> Result<VCCAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatVCC, &mut buf)?;
+        Ok(VCCAlerts::from_bytes(buf))
     }
 
     fn read_faults(&mut self) -> Result<FaultsRegister, Error<B>> {
@@ -1754,6 +2357,139 @@ where
     B: SpiDevice<u8>,
     P: PollMethod<B>,
 {
+    fn accumulator_lsbs(clock: AccumulatorClock) -> Result<(f64, f64, f64), Error<B>> {
+        match clock {
+            AccumulatorClock::Internal => Ok((
+                AccumulatedCharge::LSB_VOLT_SECONDS,
+                AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS,
+                AccumulatedTime::LSB_SECONDS,
+            )),
+            AccumulatorClock::External { frequency_hz, pre, div } => {
+                if !frequency_hz.is_finite() || frequency_hz <= 0.0 || pre > 7 || div > 31 {
+                    return Err(Error::InvalidThreshold);
+                }
+                let clock_factor = f64::from(1u16 << pre) * (f64::from(div) + 1.0) / frequency_hz;
+                Ok((
+                    1.21899e-5 * clock_factor,
+                    7.4895e-5 * clock_factor,
+                    12.8315 * clock_factor,
+                ))
+            }
+        }
+    }
+
+    fn divide_lsb_by_shunt(lsb: f64, shunt_ohms: f64) -> Result<f64, Error<B>> {
+        if !shunt_ohms.is_finite() || shunt_ohms <= 0.0 {
+            return Err(Error::InvalidThreshold);
+        }
+        Ok(lsb / shunt_ohms)
+    }
+
+    fn quantize_signed(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, Error<B>> {
+        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
+            return Err(Error::InvalidThreshold);
+        }
+        let scaled = value / lsb;
+        if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
+            return Err(Error::InvalidThreshold);
+        }
+        Ok(if scaled >= 0.0 {
+            (scaled + 0.5) as i64
+        } else {
+            (scaled - 0.5) as i64
+        })
+    }
+
+    fn quantize_signed_16(value: f64, lsb: f64) -> Result<i16, Error<B>> {
+        Self::quantize_signed(value, lsb, f64::from(i16::MIN), f64::from(i16::MAX)).map(|value| value as i16)
+    }
+
+    fn quantize_signed_48(value: f64, lsb: f64) -> Result<i64, Error<B>> {
+        const MIN: f64 = -((1u64 << 47) as f64);
+        const MAX: f64 = ((1u64 << 47) - 1) as f64;
+        Self::quantize_signed(value, lsb, MIN, MAX)
+    }
+
+    fn quantize_signed_64(value: f64, lsb: f64) -> Result<i64, Error<B>> {
+        // `i64::MAX as f64` rounds up to 2^63, so use an exclusive upper check before the cast.
+        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
+            return Err(Error::InvalidThreshold);
+        }
+        let scaled = value / lsb;
+        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&scaled) {
+            return Err(Error::InvalidThreshold);
+        }
+        Ok(if scaled >= 0.0 {
+            (scaled + 0.5) as i64
+        } else {
+            (scaled - 0.5) as i64
+        })
+    }
+
+    fn quantize_unsigned_32(value: f64, lsb: f64) -> Result<u32, Error<B>> {
+        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
+            return Err(Error::InvalidThreshold);
+        }
+        let scaled = value / lsb;
+        if value < 0.0 || scaled >= f64::from(u32::MAX) + 0.5 {
+            return Err(Error::InvalidThreshold);
+        }
+        Ok((scaled + 0.5) as u32)
+    }
+
+    fn write_signed_16_threshold_pair(
+        &mut self,
+        high_address: RegAddressP1,
+        low: f64,
+        high: f64,
+        lsb: f64,
+    ) -> Result<(), Error<B>> {
+        if low > high {
+            return Err(Error::InvalidThreshold);
+        }
+        let high = Self::quantize_signed_16(high, lsb)?;
+        let low = Self::quantize_signed_16(low, lsb)?;
+        let mut bytes = [0u8; 4];
+        bytes[..2].copy_from_slice(&high.to_be_bytes());
+        bytes[2..].copy_from_slice(&low.to_be_bytes());
+        self.write_bytes(high_address, &bytes)
+    }
+
+    fn write_signed_48_threshold_pair(
+        &mut self,
+        high_address: RegAddressP1,
+        low: f64,
+        high: f64,
+        lsb: f64,
+    ) -> Result<(), Error<B>> {
+        if low > high {
+            return Err(Error::InvalidThreshold);
+        }
+        let high = Self::quantize_signed_48(high, lsb)?.to_be_bytes();
+        let low = Self::quantize_signed_48(low, lsb)?.to_be_bytes();
+        let mut bytes = [0u8; 12];
+        bytes[..6].copy_from_slice(&high[2..]);
+        bytes[6..].copy_from_slice(&low[2..]);
+        self.write_bytes(high_address, &bytes)
+    }
+
+    fn write_signed_64_threshold_pair(
+        &mut self,
+        high_address: RegAddressP1,
+        low_address: RegAddressP1,
+        low: f64,
+        high: f64,
+        lsb: f64,
+    ) -> Result<(), Error<B>> {
+        if low > high {
+            return Err(Error::InvalidThreshold);
+        }
+        let high = Self::quantize_signed_64(high, lsb)?.to_be_bytes();
+        let low = Self::quantize_signed_64(low, lsb)?.to_be_bytes();
+        self.write_bytes(high_address, &high)?;
+        self.write_bytes(low_address, &low)
+    }
+
     /// Drains up to `N` I1 FIFO samples (3 bytes each: MSB, LSB, TAG). Stops at the first
     /// non-`Ok` sample, which is included as the terminator so the caller can read its `tag`.
     pub fn read_fifo_i1<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {

@@ -15,9 +15,10 @@
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, DcmdId,
-    Error as ClientError, FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig,
-    ShuntTcConfig, SlotValue, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AccumulatorClock, AdcConfiguration, BatteryVoltage, Channel,
+    ChargeAccumulator, Client, CurrentSenseVoltage, DcmdId, DieTemperature, EnergyAccumulator, Error as ClientError,
+    FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, PowerOrVoltage,
+    ShuntTcConfig, SlotValue, SupplyVoltage, TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::{BusError, MockSPIDevice};
@@ -503,6 +504,179 @@ fn write_adcconf_uses_page1_and_writes_to_0xdf() {
 }
 
 #[test]
+fn write_non_accumulated_thresholds_convert_si_units_and_target_table67_addresses() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x80, &[0x00, 0x14, 0xFF, 0xF6]));
+    expect_write(&mut mock, dcmd_write_bytes(0x8C, &[0x00, 0x28, 0xFF, 0xE2]));
+    expect_write(&mut mock, dcmd_write_bytes(0x84, &[0x00, 0x3C, 0xFF, 0xCE]));
+    expect_write(&mut mock, dcmd_write_bytes(0x90, &[0x00, 0x50, 0xFF, 0xBA]));
+    expect_write(&mut mock, dcmd_write_bytes(0x94, &[0x05, 0xDC, 0x00, 0x00]));
+    expect_write(&mut mock, dcmd_write_bytes(0x98, &[0x00, 0xC8, 0x00, 0x64]));
+    expect_write(&mut mock, dcmd_write_bytes(0xA0, &[0x00, 0x64, 0xFF, 0xA6]));
+    expect_write(&mut mock, dcmd_write_bytes(0xA4, &[0x00, 0x78, 0xFF, 0x92]));
+
+    let shunt = 1e-3_f32;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_current_thresholds(
+            Channel::One,
+            -10.0 * CurrentSenseVoltage::LSB_VOLTS / shunt,
+            20.0 * CurrentSenseVoltage::LSB_VOLTS / shunt,
+            shunt,
+        )
+        .unwrap();
+    client
+        .write_power_thresholds(
+            Channel::Two,
+            -30.0 * PowerOrVoltage::POWER_LSB_VOLT_SQUARED / shunt,
+            40.0 * PowerOrVoltage::POWER_LSB_VOLT_SQUARED / shunt,
+            shunt,
+        )
+        .unwrap();
+    client
+        .write_power_as_voltage_thresholds(
+            Channel::One,
+            -50.0 * PowerOrVoltage::VOLTAGE_LSB_VOLTS,
+            60.0 * PowerOrVoltage::VOLTAGE_LSB_VOLTS,
+        )
+        .unwrap();
+    client
+        .write_battery_thresholds(-70.0 * BatteryVoltage::LSB_VOLTS, 80.0 * BatteryVoltage::LSB_VOLTS)
+        .unwrap();
+    client
+        .write_temperature_thresholds(
+            -DieTemperature::ZERO_CELSIUS_KELVIN,
+            1500.0 * DieTemperature::LSB_KELVIN - DieTemperature::ZERO_CELSIUS_KELVIN,
+        )
+        .unwrap();
+    client
+        .write_vcc_thresholds(100.0 * SupplyVoltage::LSB_VOLTS, 200.0 * SupplyVoltage::LSB_VOLTS)
+        .unwrap();
+    client
+        .write_slot_voltage_thresholds(Channel::One, -90.0 * SlotValue::LSB_VOLTS, 100.0 * SlotValue::LSB_VOLTS)
+        .unwrap();
+    client
+        .write_slot_temperature_thresholds(
+            Channel::Two,
+            -110.0 * SlotValue::LSB_DEGREES_CELSIUS,
+            120.0 * SlotValue::LSB_DEGREES_CELSIUS,
+        )
+        .unwrap();
+}
+
+#[test]
+fn write_accumulator_thresholds_cover_all_table67_accumulators() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x00, &[0, 0, 0, 0, 0, 3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]),
+    );
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x20, &[0, 0, 0, 0, 0, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC]),
+    );
+    expect_write(&mut mock, dcmd_write_bytes(0x44, &7_i64.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x54, &(-6_i64).to_be_bytes()));
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x10, &[0, 0, 0, 0, 0, 9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF8]),
+    );
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x30, &[0, 0, 0, 0, 0, 11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF6]),
+    );
+    expect_write(&mut mock, dcmd_write_bytes(0x64, &13_i64.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x74, &(-12_i64).to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x0C, &14_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x2C, &15_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x4C, &16_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x6C, &17_u32.to_be_bytes()));
+
+    let shunt = 1e-3_f64;
+    let charge_lsb = AccumulatedCharge::LSB_VOLT_SECONDS / shunt;
+    let energy_lsb = AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS / shunt;
+    let time_lsb = AccumulatedTime::LSB_SECONDS;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+
+    for (accumulator, low, high) in [
+        (ChargeAccumulator::Charge1, -2.0, 3.0),
+        (ChargeAccumulator::Charge2, -4.0, 5.0),
+        (ChargeAccumulator::Charge3, -6.0, 7.0),
+    ] {
+        client
+            .write_charge_thresholds(
+                accumulator,
+                low * charge_lsb,
+                high * charge_lsb,
+                shunt,
+                AccumulatorClock::Internal,
+            )
+            .unwrap();
+    }
+    for (accumulator, low, high) in [
+        (EnergyAccumulator::Energy1, -8.0, 9.0),
+        (EnergyAccumulator::Energy2, -10.0, 11.0),
+        (EnergyAccumulator::Energy4, -12.0, 13.0),
+    ] {
+        client
+            .write_energy_thresholds(
+                accumulator,
+                low * energy_lsb,
+                high * energy_lsb,
+                shunt,
+                AccumulatorClock::Internal,
+            )
+            .unwrap();
+    }
+    for (time_base, raw) in [
+        (TimeBase::Time1, 14.0),
+        (TimeBase::Time2, 15.0),
+        (TimeBase::Time3, 16.0),
+        (TimeBase::Time4, 17.0),
+    ] {
+        client
+            .write_time_threshold(time_base, raw * time_lsb, AccumulatorClock::Internal)
+            .unwrap();
+    }
+}
+
+#[test]
+fn external_clock_threshold_scaling_uses_table27_formula() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x0C, &10_u32.to_be_bytes()));
+
+    let clock = AccumulatorClock::External {
+        frequency_hz: 10e6,
+        pre: 4,
+        div: 19,
+    };
+    let time_lsb = 12.8315 / 10e6 * 16.0 * 20.0;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_time_threshold(TimeBase::Time1, 10.0 * time_lsb, clock).unwrap();
+}
+
+#[test]
+fn invalid_threshold_is_rejected_before_bus_access() {
+    let mock = MockSPIDevice::new();
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_battery_thresholds(2.0, 1.0),
+        Err(ClientError::InvalidThreshold)
+    ));
+    assert!(matches!(
+        client.write_current_thresholds(Channel::One, -1.0, 1.0, 0.0),
+        Err(ClientError::InvalidThreshold)
+    ));
+    assert!(matches!(
+        client.write_time_threshold(TimeBase::Time1, f64::NAN, AccumulatorClock::Internal),
+        Err(ClientError::InvalidThreshold)
+    ));
+}
+
+#[test]
 fn write_opctrl_then_write_factrl_only_selects_page_once() {
     // After the first call has selected PAGE0, the second call must skip the
     // REGSCTRL write thanks to the `current_page` cache.
@@ -570,6 +744,44 @@ fn read_status_decodes_bitfield() {
     assert!(status.update());
     assert!(status.adcerr());
     assert!(status.tberr());
+}
+
+#[test]
+fn read_alert_registers_use_correct_addresses_and_decode_bitfields() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0x81, &[0xA5]); // STATVT
+    expect_dcmd_read(&mut mock, 0x82, &[0x5A]); // STATIP
+    expect_dcmd_read(&mut mock, 0x83, &[0x2D]); // STATC
+    expect_dcmd_read(&mut mock, 0x85, &[0xB5]); // STATCEOF
+    expect_dcmd_read(&mut mock, 0x86, &[0xC3]); // STATTB
+    expect_dcmd_read(&mut mock, 0x87, &[0x0A]); // STATVCC
+
+    let mut client = LTC2949::new(mock);
+
+    let vt = client.read_vt_alerts().unwrap();
+    assert!(vt.bath() && vt.temph() && vt.slot1l() && vt.slot2l());
+    assert!(!vt.batl() && !vt.templ() && !vt.slot1h() && !vt.slot2h());
+
+    let ip = client.read_ip_alerts().unwrap();
+    assert!(ip.i1l() && ip.p1l() && ip.i2h() && ip.p2h());
+    assert!(!ip.i1h() && !ip.p1h() && !ip.i2l() && !ip.p2l());
+
+    let charge = client.read_c_alerts().unwrap();
+    assert!(charge.c1h() && charge.c2h() && charge.c2l() && charge.c3l());
+    assert!(!charge.c1l() && !charge.c3h());
+
+    let ceof = client.read_ceof_alerts().unwrap();
+    assert!(ceof.c1ovf() && ceof.c3ovf() && ceof.e1ovf() && ceof.e2ovf() && ceof.e4ovf());
+    assert!(!ceof.c2ovf());
+
+    let tb = client.read_tb_alerts().unwrap();
+    assert!(tb.t1th() && tb.t2th() && tb.t3ovf() && tb.t4ovf());
+    assert!(!tb.t3th() && !tb.t4th() && !tb.t1ovf() && !tb.t2ovf());
+
+    let vcc = client.read_vcc_alerts().unwrap();
+    assert!(vcc.vccl() && vcc.occ2h());
+    assert!(!vcc.vcch() && !vcc.occ1h());
 }
 
 #[test]
