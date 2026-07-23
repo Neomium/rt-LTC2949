@@ -597,8 +597,9 @@ pub enum RegAddressP0 {
     RegsCtrl = 0xFF,
 }
 
-/// Page-1 register addresses: thresholds, ADC config, NTC-linearisation, and sense-resistor
-/// TC coefficient blocks (datasheet Tables 67, 69, 71, 76). Discriminant = on-bus `RADDR` byte.
+/// Page-1 register addresses: thresholds, gain correction, ADC config, NTC-linearisation,
+/// and sense-resistor TC coefficient blocks (datasheet Tables 67, 69, 71, 72, 76).
+/// Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum RegAddressP1 {
@@ -658,6 +659,23 @@ pub enum RegAddressP1 {
     Ntc2C = 0xE6,
     Rs2Tc = 0xE9,
     Rs2T0 = 0xEC,
+    // Gain configuration — Float24 factors and their MUX input assignments (Table 72).
+    Rs1Gc = 0xB0,
+    Rs2Gc = 0xB3,
+    RsRatio = 0xB6,
+    BatGc = 0xB9,
+    Mux1Gc = 0xC0,
+    Mux2Gc = 0xC3,
+    Mux3Gc = 0xC6,
+    Mux4Gc = 0xC9,
+    MuxNset1 = 0xBC,
+    MuxPset1 = 0xBD,
+    MuxNset2 = 0xBE,
+    MuxPset2 = 0xBF,
+    MuxNset3 = 0xCC,
+    MuxPset3 = 0xCD,
+    MuxNset4 = 0xCE,
+    MuxPset4 = 0xCF,
 }
 
 /// Raw I1/I2 slow-mode current-sense voltage result.
@@ -673,6 +691,11 @@ pub struct CurrentSenseVoltage {
 impl CurrentSenseVoltage {
     /// Voltage represented by one raw ADC code.
     pub const LSB_VOLTS: f32 = 950e-9;
+    /// Voltage represented by one I1TH/I1TL or I2TH/I2TL threshold code.
+    ///
+    /// The threshold registers contain the upper 16 bits of the effective 18-bit current
+    /// result, so their LSB is four times the result-register LSB (3.8 µV).
+    pub const THRESHOLD_LSB_VOLTS: f32 = 4.0 * Self::LSB_VOLTS;
 
     /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
     pub const fn from_raw(raw: i32) -> Self {
@@ -734,6 +757,10 @@ impl PowerOrVoltage {
     pub const POWER_LSB_VOLT_SQUARED: f32 = 5.8368e-12;
     /// Voltage-mode scale represented by one raw ADC code.
     pub const VOLTAGE_LSB_VOLTS: f32 = 46.875e-6;
+    /// Power-mode scale represented by one P1TH/P1TL or P2TH/P2TL threshold code.
+    pub const POWER_THRESHOLD_LSB_VOLT_SQUARED: f32 = 4.0 * Self::POWER_LSB_VOLT_SQUARED;
+    /// Voltage-mode scale represented by one P1TH/P1TL or P2TH/P2TL threshold code.
+    pub const VOLTAGE_THRESHOLD_LSB_VOLTS: f32 = 4.0 * Self::VOLTAGE_LSB_VOLTS;
 
     /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
     pub const fn from_raw(raw: i32) -> Self {
@@ -1285,6 +1312,28 @@ pub struct CAlerts {
     __: B2,
 }
 
+/// Energy threshold alerts (STATE, PAGE0, 0x84; datasheet Table 38).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct EAlerts {
+    /// E1H: Energy1 high threshold exceeded.
+    pub e1h: bool,
+    /// E1L: Energy1 low threshold exceeded.
+    pub e1l: bool,
+    /// E2H: Energy2 high threshold exceeded.
+    pub e2h: bool,
+    /// E2L: Energy2 low threshold exceeded.
+    pub e2l: bool,
+    // Reserved bits 4–5.
+    #[skip]
+    __: B2,
+    /// E4H: Energy4 high threshold exceeded.
+    pub e4h: bool,
+    /// E4L: Energy4 low threshold exceeded.
+    pub e4l: bool,
+}
+
 /// Charge and energy overflow alerts (STATCEOF, PAGE0, 0x85; datasheet Table 39).
 #[bitfield(bits = 8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -1531,6 +1580,15 @@ pub enum MuxInput {
     Vref2Via250k = 23,
 }
 
+/// One of the four programmable AUX-MUX gain-correction settings in Table 72.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum MuxGainSlot {
+    One,
+    Two,
+    Three,
+    Four,
+}
+
 /// Errors that can occur talking to an LTC2949.
 pub enum Error<B: SpiDevice<u8>> {
     /// Underlying SPI transaction failed.
@@ -1540,6 +1598,8 @@ pub enum Error<B: SpiDevice<u8>> {
     /// A threshold was non-finite, used an invalid clock/shunt configuration, had its low
     /// bound above its high bound, or did not fit in the corresponding Table 67 register.
     InvalidThreshold,
+    /// A gain factor or resistance used to derive one was zero, negative, NaN, or infinite.
+    InvalidGainCorrection,
 }
 
 impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
@@ -1548,6 +1608,7 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
             Error::BusError(_) => f.debug_struct("BusError").finish(),
             Error::ChecksumMismatch => f.debug_struct("ChecksumMismatch").finish(),
             Error::InvalidThreshold => f.debug_struct("InvalidThreshold").finish(),
+            Error::InvalidGainCorrection => f.debug_struct("InvalidGainCorrection").finish(),
         }
     }
 }
@@ -1583,6 +1644,38 @@ pub trait Client {
     /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
     fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Self::Error>;
 
+    /// Writes the Float24 gain-correction factor for sense resistor 1 or 2 (`RS1GC` or
+    /// `RS2GC`, Table 72). The factor is dimensionless and must be positive and finite.
+    /// Apply the change with an `ADJUPD` pulse while the device is in STANDBY.
+    fn write_shunt_gain_correction(&mut self, channel: Channel, correction_factor: f32) -> Result<(), Self::Error>;
+
+    /// Calculates `nominal_ohms / actual_ohms` and writes it to `RS1GC` or `RS2GC`.
+    /// This directly implements the shunt-calibration calculation shown below Table 72.
+    fn write_shunt_gain_correction_from_resistances(
+        &mut self,
+        channel: Channel,
+        nominal_ohms: f32,
+        actual_ohms: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Calculates and writes `RSRATIO = RS1 / RS2` as Float24. This factor is used when
+    /// channel 2 contributes to the combined C3 and E4 accumulators.
+    fn write_shunt_ratio(&mut self, rs1_ohms: f32, rs2_ohms: f32) -> Result<(), Self::Error>;
+
+    /// Writes the dimensionless battery-divider gain-correction factor (`BATGC`) as Float24.
+    fn write_battery_gain_correction(&mut self, correction_factor: f32) -> Result<(), Self::Error>;
+
+    /// Configures one of the four AUX-MUX gain corrections. Writes its Float24 `MUXnGC`
+    /// factor and the matching `MUXNSETn`/`MUXPSETn` input codes from Table 57.
+    /// Matching is polarity-independent in the LTC2949.
+    fn write_mux_gain_correction(
+        &mut self,
+        slot: MuxGainSlot,
+        correction_factor: f32,
+        negative: MuxInput,
+        positive: MuxInput,
+    ) -> Result<(), Self::Error>;
+
     /// Writes the low and high threshold for C1, C2, or C3 (Table 67), converting coulombs
     /// with `shunt_ohms` and the selected accumulator clock. C3 uses the channel-1 shunt.
     fn write_charge_thresholds(
@@ -1614,7 +1707,8 @@ pub trait Client {
     ) -> Result<(), Self::Error>;
 
     /// Writes an I1/I2 low/high threshold pair in amperes. `shunt_ohms` converts the
-    /// requested current to the differential shunt voltage represented by the register.
+    /// requested current to differential shunt voltage. The 16-bit threshold LSB is 3.8 µV
+    /// (four times the 18-bit I1/I2 result LSB).
     fn write_current_thresholds(
         &mut self,
         channel: Channel,
@@ -1624,7 +1718,8 @@ pub trait Client {
     ) -> Result<(), Self::Error>;
 
     /// Writes a power-mode P1/P2 low/high threshold pair in watts. Use this when the
-    /// corresponding `PxASV` bit is clear.
+    /// corresponding `PxASV` bit is clear. The 16-bit threshold LSB is four times the
+    /// P1/P2 result-register LSB.
     fn write_power_thresholds(
         &mut self,
         channel: Channel,
@@ -1634,7 +1729,7 @@ pub trait Client {
     ) -> Result<(), Self::Error>;
 
     /// Writes a voltage-mode P1/P2 low/high threshold pair in volts. Use this when the
-    /// corresponding `PxASV` bit is set.
+    /// corresponding `PxASV` bit is set. The 16-bit threshold LSB is 187.5 µV.
     fn write_power_as_voltage_thresholds(
         &mut self,
         channel: Channel,
@@ -1709,6 +1804,8 @@ pub trait Client {
 
     /// Reads accumulated-charge threshold alerts (STATC, PAGE0, 0x83; datasheet Table 37).
     fn read_c_alerts(&mut self) -> Result<CAlerts, Self::Error>;
+
+    fn read_e_alerts(&mut self) -> Result<EAlerts, Self::Error>;
 
     /// Reads charge and energy accumulator overflow alerts (STATCEOF, PAGE0, 0x85;
     /// datasheet Table 39).
@@ -1907,6 +2004,51 @@ where
         self.write_bytes(RegAddressP1::AdcConf, &value.into_bytes())
     }
 
+    fn write_shunt_gain_correction(&mut self, channel: Channel, correction_factor: f32) -> Result<(), Error<B>> {
+        let address = match channel {
+            Channel::One => RegAddressP1::Rs1Gc,
+            Channel::Two => RegAddressP1::Rs2Gc,
+        };
+        self.write_gain_factor(address, correction_factor)
+    }
+
+    fn write_shunt_gain_correction_from_resistances(
+        &mut self,
+        channel: Channel,
+        nominal_ohms: f32,
+        actual_ohms: f32,
+    ) -> Result<(), Error<B>> {
+        let correction_factor = Self::positive_ratio(nominal_ohms, actual_ohms)?;
+        self.write_shunt_gain_correction(channel, correction_factor)
+    }
+
+    fn write_shunt_ratio(&mut self, rs1_ohms: f32, rs2_ohms: f32) -> Result<(), Error<B>> {
+        let ratio = Self::positive_ratio(rs1_ohms, rs2_ohms)?;
+        self.write_gain_factor(RegAddressP1::RsRatio, ratio)
+    }
+
+    fn write_battery_gain_correction(&mut self, correction_factor: f32) -> Result<(), Error<B>> {
+        self.write_gain_factor(RegAddressP1::BatGc, correction_factor)
+    }
+
+    fn write_mux_gain_correction(
+        &mut self,
+        slot: MuxGainSlot,
+        correction_factor: f32,
+        negative: MuxInput,
+        positive: MuxInput,
+    ) -> Result<(), Error<B>> {
+        let (gain_address, mux_set_address) = match slot {
+            MuxGainSlot::One => (RegAddressP1::Mux1Gc, RegAddressP1::MuxNset1),
+            MuxGainSlot::Two => (RegAddressP1::Mux2Gc, RegAddressP1::MuxNset2),
+            MuxGainSlot::Three => (RegAddressP1::Mux3Gc, RegAddressP1::MuxNset3),
+            MuxGainSlot::Four => (RegAddressP1::Mux4Gc, RegAddressP1::MuxNset4),
+        };
+        let encoded = Self::encode_gain_factor(correction_factor)?;
+        self.write_bytes(gain_address, &encoded)?;
+        self.write_bytes(mux_set_address, &[negative as u8, positive as u8])
+    }
+
     fn write_charge_thresholds(
         &mut self,
         accumulator: ChargeAccumulator,
@@ -1985,7 +2127,8 @@ where
         high_amperes: f32,
         shunt_ohms: f32,
     ) -> Result<(), Error<B>> {
-        let lsb_amperes = Self::divide_lsb_by_shunt(CurrentSenseVoltage::LSB_VOLTS as f64, shunt_ohms as f64)?;
+        let lsb_amperes =
+            Self::divide_lsb_by_shunt(CurrentSenseVoltage::THRESHOLD_LSB_VOLTS as f64, shunt_ohms as f64)?;
         let address = match channel {
             Channel::One => RegAddressP1::I1Th,
             Channel::Two => RegAddressP1::I2Th,
@@ -2000,7 +2143,10 @@ where
         high_watts: f32,
         shunt_ohms: f32,
     ) -> Result<(), Error<B>> {
-        let lsb_watts = Self::divide_lsb_by_shunt(PowerOrVoltage::POWER_LSB_VOLT_SQUARED as f64, shunt_ohms as f64)?;
+        let lsb_watts = Self::divide_lsb_by_shunt(
+            PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED as f64,
+            shunt_ohms as f64,
+        )?;
         let address = match channel {
             Channel::One => RegAddressP1::P1Th,
             Channel::Two => RegAddressP1::P2Th,
@@ -2022,7 +2168,7 @@ where
             address,
             low_volts as f64,
             high_volts as f64,
-            PowerOrVoltage::VOLTAGE_LSB_VOLTS as f64,
+            PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS as f64,
         )
     }
 
@@ -2188,6 +2334,12 @@ where
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::StatC, &mut buf)?;
         Ok(CAlerts::from_bytes(buf))
+    }
+
+    fn read_e_alerts(&mut self) -> Result<EAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatE, &mut buf)?;
+        Ok(EAlerts::from_bytes(buf))
     }
 
     fn read_ceof_alerts(&mut self) -> Result<CEOFAlerts, Self::Error> {
@@ -2357,6 +2509,29 @@ where
     B: SpiDevice<u8>,
     P: PollMethod<B>,
 {
+    fn encode_gain_factor(correction_factor: f32) -> Result<[u8; 3], Error<B>> {
+        if !correction_factor.is_finite() || correction_factor <= 0.0 {
+            return Err(Error::InvalidGainCorrection);
+        }
+        Ok(Float24::new(correction_factor).encode())
+    }
+
+    fn write_gain_factor(&mut self, address: RegAddressP1, correction_factor: f32) -> Result<(), Error<B>> {
+        let encoded = Self::encode_gain_factor(correction_factor)?;
+        self.write_bytes(address, &encoded)
+    }
+
+    fn positive_ratio(numerator: f32, denominator: f32) -> Result<f32, Error<B>> {
+        if !numerator.is_finite() || numerator <= 0.0 || !denominator.is_finite() || denominator <= 0.0 {
+            return Err(Error::InvalidGainCorrection);
+        }
+        let ratio = numerator / denominator;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(Error::InvalidGainCorrection);
+        }
+        Ok(ratio)
+    }
+
     fn accumulator_lsbs(clock: AccumulatorClock) -> Result<(f64, f64, f64), Error<B>> {
         match clock {
             AccumulatorClock::Internal => Ok((

@@ -17,8 +17,8 @@
 use crate::client::{
     AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AccumulatorClock, AdcConfiguration, BatteryVoltage, Channel,
     ChargeAccumulator, Client, CurrentSenseVoltage, DcmdId, DieTemperature, EnergyAccumulator, Error as ClientError,
-    FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig, PowerOrVoltage,
-    ShuntTcConfig, SlotValue, SupplyVoltage, TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    FastControlRegister, FifoTag, MuxGainSlot, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig,
+    PowerOrVoltage, ShuntTcConfig, SlotValue, SupplyVoltage, TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::{BusError, MockSPIDevice};
@@ -521,24 +521,24 @@ fn write_non_accumulated_thresholds_convert_si_units_and_target_table67_addresse
     client
         .write_current_thresholds(
             Channel::One,
-            -10.0 * CurrentSenseVoltage::LSB_VOLTS / shunt,
-            20.0 * CurrentSenseVoltage::LSB_VOLTS / shunt,
+            -10.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+            20.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
             shunt,
         )
         .unwrap();
     client
         .write_power_thresholds(
             Channel::Two,
-            -30.0 * PowerOrVoltage::POWER_LSB_VOLT_SQUARED / shunt,
-            40.0 * PowerOrVoltage::POWER_LSB_VOLT_SQUARED / shunt,
+            -30.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+            40.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
             shunt,
         )
         .unwrap();
     client
         .write_power_as_voltage_thresholds(
             Channel::One,
-            -50.0 * PowerOrVoltage::VOLTAGE_LSB_VOLTS,
-            60.0 * PowerOrVoltage::VOLTAGE_LSB_VOLTS,
+            -50.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+            60.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
         )
         .unwrap();
     client
@@ -563,6 +563,20 @@ fn write_non_accumulated_thresholds_convert_si_units_and_target_table67_addresse
             120.0 * SlotValue::LSB_DEGREES_CELSIUS,
         )
         .unwrap();
+}
+
+#[test]
+fn half_amp_current_threshold_uses_3_8uv_lsb() {
+    // 0.5 A through 100 µΩ produces 50 µV. I1TH is a 16-bit threshold containing the
+    // upper 16 bits of the effective 18-bit current result, so one code is 3.8 µV:
+    // round(50 / 3.8) = 13. Using the 950 nV result LSB here would produce code 53 and
+    // make the hardware trigger at approximately 2 A.
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x80, &[0x00, 0x0D, 0x00, 0x00]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_current_thresholds(Channel::One, 0.0, 0.5, 100e-6).unwrap();
 }
 
 #[test]
@@ -673,6 +687,74 @@ fn invalid_threshold_is_rejected_before_bus_access() {
     assert!(matches!(
         client.write_time_threshold(TimeBase::Time1, f64::NAN, AccumulatorClock::Internal),
         Err(ClientError::InvalidThreshold)
+    ));
+}
+
+#[test]
+fn write_gain_corrections_match_table72_addresses_and_examples() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0xB0, &[0x3E, 0xF5, 0xF5])); // 100/102
+    expect_write(&mut mock, dcmd_write_bytes(0xB3, &[0x3F, 0x06, 0x24])); // 1.024
+    expect_write(&mut mock, dcmd_write_bytes(0xB6, &[0x38, 0x47, 0xAE])); // 0.01
+    expect_write(&mut mock, dcmd_write_bytes(0xB9, &[0x3E, 0xE6, 0x66])); // 0.95
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_shunt_gain_correction_from_resistances(Channel::One, 100e-6, 102e-6)
+        .unwrap();
+    client.write_shunt_gain_correction(Channel::Two, 1.024).unwrap();
+    client.write_shunt_ratio(100e-6, 10e-3).unwrap();
+    client.write_battery_gain_correction(0.95).unwrap();
+}
+
+#[test]
+fn write_mux_gain_corrections_write_float24_factor_and_input_pair() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0xC0, &[0x3E, 0xCC, 0xCC]));
+    expect_write(&mut mock, dcmd_write_bytes(0xBC, &[0x02, 0x01]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC3, &f24(1.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xBE, &[0x0F, 0x10]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC6, &f24(1.01)));
+    expect_write(&mut mock, dcmd_write_bytes(0xCC, &[0x11, 0x12]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC9, &f24(0.99)));
+    expect_write(&mut mock, dcmd_write_bytes(0xCE, &[0x13, 0x14]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_mux_gain_correction(MuxGainSlot::One, 0.9, MuxInput::V2, MuxInput::V1)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Two, 1.0, MuxInput::VbatM, MuxInput::VbatP)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Three, 1.01, MuxInput::Cf2M, MuxInput::Cf2P)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Four, 0.99, MuxInput::Cf1M, MuxInput::Cf1P)
+        .unwrap();
+}
+
+#[test]
+fn invalid_gain_correction_is_rejected_before_bus_access() {
+    let mock = MockSPIDevice::new();
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_shunt_gain_correction(Channel::One, f32::NAN),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_shunt_gain_correction_from_resistances(Channel::One, 100e-6, 0.0),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_shunt_ratio(-100e-6, 10e-3),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_mux_gain_correction(MuxGainSlot::One, 0.0, MuxInput::V2, MuxInput::V1),
+        Err(ClientError::InvalidGainCorrection)
     ));
 }
 
