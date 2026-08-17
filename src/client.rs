@@ -149,17 +149,30 @@
 //!
 //! ## GPIO control
 //!
-//! [`Client::write_gpio_ctrl`] writes the raw `FGPIOCTRL` byte, which contains four 2-bit GPIO
-//! control fields. In this example `GPIO1CTRL = 0b11` drives GPIO1 high while the remaining
-//! fields stay `0b00` (tristate).
+//! [`Client::write_gpio_ctrl`] writes `FGPIOCTRL`, which contains four type-safe 2-bit GPIO
+//! control fields. In this example GPIO1 is driven high while the remaining GPIOs stay
+//! tristated.
 //!
 //! ```
-//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::client::{Client, GpioControlRegister, GpioCtrl, LTC2949};
 //! # use ltc2949::example::ExampleSPIDevice;
 //! let mut client = LTC2949::new(ExampleSPIDevice::default());
-//! let gpio_control = 0b00_00_00_11;
+//! let gpio_control = GpioControlRegister::new().with_gpio1_ctrl(GpioCtrl::High);
 //!
 //! client.write_gpio_ctrl(gpio_control).unwrap();
+//! ```
+//!
+//! [`Client::write_gpio5_config`] writes ´FCURGPIOCTRL´, which controls MUXP & MUXN Current sources and
+//! GPIO 5. Changes only tajke effect after ´FGPIOCTRL´, has been written, so [`Client::write_gpio_ctrl`]
+//! should be called afterwards.
+//!
+//! ```
+//! # use ltc2949::client::{Client, CurGpioControlRegister, GpioCtrl, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let gpio5_config = CurGpioControlRegister::new().with_gpio5_ctrl(GpioCtrl::Toggle400kHz);
+//!
+//! client.write_gpio5_config(gpio5_config).unwrap();
 //! ```
 //!
 //! ## Overcurrent configuration
@@ -294,20 +307,19 @@
 //! [`Error::InvalidThreshold`].
 //!
 //! ```
-//! # use ltc2949::client::{AccumulatorClock, ChargeAccumulator, Channel, Client, LTC2949};
+//! # use ltc2949::client::{AccumulatorClock, ChargeAccumulator, Channel, Client, LTC2949, ThresholdPair};
 //! # use ltc2949::example::ExampleSPIDevice;
 //! let mut client = LTC2949::new(ExampleSPIDevice::default());
 //! let shunt_ohms = 100e-6;
 //!
 //! client
-//!     .write_current_thresholds(Channel::One, -100.0, 100.0, shunt_ohms)
+//!     .write_current_thresholds(Channel::One, ThresholdPair::new(-100.0, 100.0), shunt_ohms)
 //!     .unwrap();
-//! client.write_battery_thresholds(0.0, 10.0).unwrap();
+//! client.write_battery_thresholds(ThresholdPair::new(0.0, 10.0)).unwrap();
 //! client
 //!     .write_charge_thresholds(
 //!         ChargeAccumulator::Charge1,
-//!         -100.0,
-//!         100.0,
+//!         ThresholdPair::new(-100.0, 100.0),
 //!         shunt_ohms as f64,
 //!         AccumulatorClock::Internal,
 //!     )
@@ -573,6 +585,7 @@ pub enum RegAddressP0 {
     Slot2 = 0xA8,
     Vref = 0xAA,
     Current2Avg = 0xAC,
+    Gpio4HbCtrl = 0xE8,
     // Slow-mode auxiliary-MUX slot selection (datasheet Tables 57 & 58). SLOT1/2 each
     // have separate MUXN / MUXP registers, adjacent so a 2-byte burst sets both.
     Slot1MuxN = 0xEB,
@@ -1018,6 +1031,277 @@ pub enum TimeBase {
     Time4,
 }
 
+/// A single threshold expressed in the caller's physical unit.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Threshold<T> {
+    /// Threshold in the physical unit expected by the caller.
+    pub value: T,
+}
+
+impl<T> Threshold<T> {
+    /// Creates a single physical threshold.
+    pub const fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+/// Low and high thresholds expressed in the caller's physical unit.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct ThresholdPair<T> {
+    /// Low threshold in the physical unit expected by the caller.
+    pub low: T,
+    /// High threshold in the physical unit expected by the caller.
+    pub high: T,
+}
+
+impl<T> ThresholdPair<T> {
+    /// Creates an ordered low/high physical threshold pair.
+    ///
+    /// Ordering is validated when the pair is quantized or passed to a client method.
+    pub const fn new(low: T, high: T) -> Self {
+        Self { low, high }
+    }
+}
+
+/// Reason a physical threshold could not be converted to its register representation.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ThresholdConversionError {
+    /// A threshold value was NaN or infinite.
+    NonFiniteValue,
+    /// The LSB was zero, negative, NaN, or infinite.
+    InvalidScale,
+    /// The low threshold was greater than the high threshold.
+    LowAboveHigh,
+    /// The rounded value does not fit in the target register format.
+    OutOfRange,
+}
+
+/// Converts a threshold in physical units into a scaled LTC2949 register value.
+///
+/// `lsb` is the amount of the physical unit represented by one register code. Conversion
+/// rounds to the nearest code, with half-way values rounded away from zero.
+pub trait Quantize<Output> {
+    /// Quantizes this value using the supplied physical-unit LSB.
+    fn quantize(self, lsb: f64) -> Result<Output, ThresholdConversionError>;
+}
+
+/// Encoded signed 16-bit high/low threshold pair used by the non-accumulated measurements.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed16Thresholds {
+    high: i16,
+    low: i16,
+}
+
+impl Signed16Thresholds {
+    /// Returns the quantized high threshold.
+    pub const fn high(self) -> i16 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold.
+    pub const fn low(self) -> i16 {
+        self.low
+    }
+
+    /// Encodes the high value followed by the low value, most-significant byte first.
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        let mut bytes = [0u8; 4];
+        bytes[..2].copy_from_slice(&self.high.to_be_bytes());
+        bytes[2..].copy_from_slice(&self.low.to_be_bytes());
+        bytes
+    }
+}
+
+/// Encoded signed 48-bit high/low accumulator threshold pair.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed48Thresholds {
+    high: i64,
+    low: i64,
+}
+
+impl Signed48Thresholds {
+    /// Returns the quantized high threshold as a sign-extended `i64`.
+    pub const fn high(self) -> i64 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold as a sign-extended `i64`.
+    pub const fn low(self) -> i64 {
+        self.low
+    }
+
+    /// Encodes the high value followed by the low value as two big-endian 48-bit values.
+    pub fn to_be_bytes(self) -> [u8; 12] {
+        let high = self.high.to_be_bytes();
+        let low = self.low.to_be_bytes();
+        let mut bytes = [0u8; 12];
+        bytes[..6].copy_from_slice(&high[2..]);
+        bytes[6..].copy_from_slice(&low[2..]);
+        bytes
+    }
+}
+
+/// Encoded signed 64-bit high/low accumulator threshold pair.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed64Thresholds {
+    high: i64,
+    low: i64,
+}
+
+impl Signed64Thresholds {
+    /// Returns the quantized high threshold.
+    pub const fn high(self) -> i64 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold.
+    pub const fn low(self) -> i64 {
+        self.low
+    }
+
+    /// Encodes the high threshold, most-significant byte first.
+    pub const fn high_to_be_bytes(self) -> [u8; 8] {
+        self.high.to_be_bytes()
+    }
+
+    /// Encodes the low threshold, most-significant byte first.
+    pub const fn low_to_be_bytes(self) -> [u8; 8] {
+        self.low.to_be_bytes()
+    }
+}
+
+/// Encoded unsigned 32-bit time-base threshold.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Unsigned32Threshold {
+    raw: u32,
+}
+
+impl Unsigned32Threshold {
+    /// Returns the quantized register code.
+    pub const fn raw(self) -> u32 {
+        self.raw
+    }
+
+    /// Encodes the threshold, most-significant byte first.
+    pub const fn to_be_bytes(self) -> [u8; 4] {
+        self.raw.to_be_bytes()
+    }
+}
+
+fn quantize_signed_code(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, ThresholdConversionError> {
+    if !value.is_finite() {
+        return Err(ThresholdConversionError::NonFiniteValue);
+    }
+    if !lsb.is_finite() || lsb <= 0.0 {
+        return Err(ThresholdConversionError::InvalidScale);
+    }
+    let scaled = value / lsb;
+    if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
+        return Err(ThresholdConversionError::OutOfRange);
+    }
+    Ok(if scaled >= 0.0 {
+        (scaled + 0.5) as i64
+    } else {
+        (scaled - 0.5) as i64
+    })
+}
+
+impl Quantize<Signed16Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed16Thresholds, ThresholdConversionError> {
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        Ok(Signed16Thresholds {
+            high: quantize_signed_code(self.high, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+            low: quantize_signed_code(self.low, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+        })
+    }
+}
+
+impl Quantize<Signed16Thresholds> for ThresholdPair<f32> {
+    fn quantize(self, lsb: f64) -> Result<Signed16Thresholds, ThresholdConversionError> {
+        ThresholdPair::new(f64::from(self.low), f64::from(self.high)).quantize(lsb)
+    }
+}
+
+impl Quantize<Signed48Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed48Thresholds, ThresholdConversionError> {
+        const MIN: f64 = -((1u64 << 47) as f64);
+        const MAX: f64 = ((1u64 << 47) - 1) as f64;
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        Ok(Signed48Thresholds {
+            high: quantize_signed_code(self.high, lsb, MIN, MAX)?,
+            low: quantize_signed_code(self.low, lsb, MIN, MAX)?,
+        })
+    }
+}
+
+impl Quantize<Signed64Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed64Thresholds, ThresholdConversionError> {
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+        if !self.low.is_finite() || !self.high.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+
+        fn quantize(value: f64, lsb: f64) -> Result<i64, ThresholdConversionError> {
+            // `i64::MAX as f64` rounds up to 2^63, so use an exclusive upper bound.
+            let scaled = value / lsb;
+            if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&scaled) {
+                return Err(ThresholdConversionError::OutOfRange);
+            }
+            Ok(if scaled >= 0.0 {
+                (scaled + 0.5) as i64
+            } else {
+                (scaled - 0.5) as i64
+            })
+        }
+
+        Ok(Signed64Thresholds {
+            high: quantize(self.high, lsb)?,
+            low: quantize(self.low, lsb)?,
+        })
+    }
+}
+
+impl Quantize<Unsigned32Threshold> for Threshold<f64> {
+    fn quantize(self, lsb: f64) -> Result<Unsigned32Threshold, ThresholdConversionError> {
+        if !self.value.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+        let scaled = self.value / lsb;
+        if self.value < 0.0 || scaled >= f64::from(u32::MAX) + 0.5 {
+            return Err(ThresholdConversionError::OutOfRange);
+        }
+        Ok(Unsigned32Threshold {
+            raw: (scaled + 0.5) as u32,
+        })
+    }
+}
+
+/// Output mode encoded by each two-bit `GPIOxCTRL` field (datasheet Tables 62 and 63).
+#[derive(Specifier, Copy, Clone, Eq, PartialEq, Debug)]
+#[bits = 2]
+pub enum GpioCtrl {
+    /// High-impedance input.
+    Tristate = 0b00,
+    /// Drive low (DGND).
+    Low = 0b01,
+    /// Toggle at 400 kHz.
+    Toggle400kHz = 0b10,
+    /// Drive high (DVCC).
+    High = 0b11,
+}
+
 /// Clock configuration used to scale accumulated charge, energy, and time thresholds.
 ///
 /// [`Internal`](Self::Internal) also covers a 4 MHz crystal with the datasheet's `PRE = 2`,
@@ -1034,6 +1318,37 @@ pub enum AccumulatorClock {
         /// DIV field value (0–31).
         div: u8,
     },
+}
+
+/// Errors returned when an [`AccumulatorClock`] cannot be converted into accumulator LSBs.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum AccumulatorClockError {
+    /// The clock configuration is invalid for the datasheet formula.
+    InvalidConfiguration,
+}
+
+impl AccumulatorClock {
+    /// Returns the charge, energy, and time LSBs for this clock configuration.
+    pub fn lsbs(self) -> Result<(f64, f64, f64), AccumulatorClockError> {
+        match self {
+            AccumulatorClock::Internal => Ok((
+                AccumulatedCharge::LSB_VOLT_SECONDS,
+                AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS,
+                AccumulatedTime::LSB_SECONDS,
+            )),
+            AccumulatorClock::External { frequency_hz, pre, div } => {
+                if !frequency_hz.is_finite() || frequency_hz <= 0.0 || pre > 7 || div > 31 {
+                    return Err(AccumulatorClockError::InvalidConfiguration);
+                }
+                let clock_factor = f64::from(1u16 << pre) * (f64::from(div) + 1.0) / frequency_hz;
+                Ok((
+                    1.21899e-5 * clock_factor,
+                    7.4895e-5 * clock_factor,
+                    12.8315 * clock_factor,
+                ))
+            }
+        }
+    }
 }
 
 impl AccumulatedTime {
@@ -1078,6 +1393,60 @@ impl Register for RegAddressP1 {
     fn addr(self) -> u8 {
         self as u8
     }
+}
+
+/// GPIO4 heartbeat control register (`GPIO4HBCTRL`, PAGE0 0xE8; datasheet Table 61).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct Gpio4HeartbeatControlRegister {
+    /// Enable the GPIO4 heartbeat output.
+    pub gpio4_hb_enable: bool,
+    // Reserved bits 7:1. Write as zero.
+    #[skip]
+    __: B7,
+}
+
+/// Current-source and GPIO5 control register (`FCURGPIOCTRL`, PAGE0 0xF1;
+/// datasheet Table 62).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CurGpioControlRegister {
+    /// GPIO5 output mode.
+    #[bits = 2]
+    pub gpio5_ctrl: GpioCtrl,
+    // Reserved bits 3:2. Write as zero.
+    #[skip]
+    __: B2,
+    /// MUXP current-source polarity.
+    pub mux_p_cur_pol: bool,
+    /// Enable the MUXP current source.
+    pub mux_p_cur_en: bool,
+    /// MUXN current-source polarity.
+    pub mux_n_cur_pol: bool,
+    /// Enable the MUXN current source.
+    pub mux_n_cur_en: bool,
+}
+
+/// GPIO1 through GPIO4 control register (`FGPIOCTRL`, PAGE0 0xF2;
+/// datasheet Table 63).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct GpioControlRegister {
+    /// GPIO1 output mode (bits 1:0).
+    #[bits = 2]
+    pub gpio1_ctrl: GpioCtrl,
+    /// GPIO2 output mode (bits 3:2).
+    #[bits = 2]
+    pub gpio2_ctrl: GpioCtrl,
+    /// GPIO3 output mode (bits 5:4).
+    #[bits = 2]
+    pub gpio3_ctrl: GpioCtrl,
+    /// GPIO4 output mode (bits 7:6).
+    #[bits = 2]
+    pub gpio4_ctrl: GpioCtrl,
 }
 
 /// Operation Control register (PAGE0, 0xF0) — datasheet Table 24. `clr`, `sshot`, `adjupd`
@@ -1197,6 +1566,24 @@ pub struct RegControlRegister {
 }
 
 impl Default for OpsControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for Gpio4HeartbeatControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for CurGpioControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for GpioControlRegister {
     fn default() -> Self {
         Self::new()
     }
@@ -1589,6 +1976,99 @@ pub enum MuxGainSlot {
     Four,
 }
 
+/// Gain correction applied to one current-sense channel (`RS1GC` or `RS2GC`).
+///
+/// Construct it either from an already calculated dimensionless correction factor or from
+/// the shunt's nominal and measured resistance. In the latter case the programmed factor is
+/// `nominal_ohms / actual_ohms`, as specified below datasheet Table 72.
+///
+/// Input validation happens in [`Client::write_shunt_gain_correction`], allowing both
+/// constructors to remain infallible and convenient in configuration structures.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct ShuntGainCorrection {
+    source: ShuntGainCorrectionSource,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum ShuntGainCorrectionSource {
+    CorrectionFactor(f32),
+    Resistances { nominal_ohms: f32, actual_ohms: f32 },
+}
+
+impl ShuntGainCorrection {
+    /// Uses an already calculated, dimensionless correction factor.
+    pub const fn from_correction_factor(correction_factor: f32) -> Self {
+        Self {
+            source: ShuntGainCorrectionSource::CorrectionFactor(correction_factor),
+        }
+    }
+
+    /// Calculates the correction factor from the nominal and measured shunt resistances.
+    pub const fn from_resistances(nominal_ohms: f32, actual_ohms: f32) -> Self {
+        Self {
+            source: ShuntGainCorrectionSource::Resistances {
+                nominal_ohms,
+                actual_ohms,
+            },
+        }
+    }
+
+    /// Returns the dimensionless factor that will be written to the gain-correction register.
+    ///
+    /// This is the supplied factor or `nominal_ohms / actual_ohms`. The write method rejects
+    /// non-positive or non-finite inputs before accessing the bus.
+    pub fn correction_factor(self) -> f32 {
+        match self.source {
+            ShuntGainCorrectionSource::CorrectionFactor(correction_factor) => correction_factor,
+            ShuntGainCorrectionSource::Resistances {
+                nominal_ohms,
+                actual_ohms,
+            } => nominal_ohms / actual_ohms,
+        }
+    }
+}
+
+/// A strictly positive, finite ratio.
+///
+/// This wraps the `numerator / denominator` check used for shunt calibration and shunt-ratio
+/// writes so callers can validate it once and reuse the resulting value.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct PositiveRatio(f32);
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PositiveRatioError {
+    NonPositiveOrNonFinite,
+}
+
+impl PositiveRatio {
+    /// Constructs a ratio from an already calculated dimensionless value.
+    pub fn try_from_ratio(ratio: f32) -> Result<Self, PositiveRatioError> {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(PositiveRatioError::NonPositiveOrNonFinite);
+        }
+        Ok(Self(ratio))
+    }
+
+    /// Constructs a ratio from `numerator / denominator`.
+    pub fn try_from_parts(numerator: f32, denominator: f32) -> Result<Self, PositiveRatioError> {
+        if !numerator.is_finite() || numerator <= 0.0 || !denominator.is_finite() || denominator <= 0.0 {
+            return Err(PositiveRatioError::NonPositiveOrNonFinite);
+        }
+        Self::try_from_ratio(numerator / denominator)
+    }
+
+    /// Returns the stored ratio.
+    pub const fn value(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<PositiveRatio> for f32 {
+    fn from(ratio: PositiveRatio) -> Self {
+        ratio.value()
+    }
+}
+
 /// Errors that can occur talking to an LTC2949.
 pub enum Error<B: SpiDevice<u8>> {
     /// Underlying SPI transaction failed.
@@ -1610,6 +2090,12 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
             Error::InvalidThreshold => f.debug_struct("InvalidThreshold").finish(),
             Error::InvalidGainCorrection => f.debug_struct("InvalidGainCorrection").finish(),
         }
+    }
+}
+
+impl<B: SpiDevice<u8>> From<ThresholdConversionError> for Error<B> {
+    fn from(_: ThresholdConversionError) -> Self {
+        Self::InvalidThreshold
     }
 }
 
@@ -1644,18 +2130,14 @@ pub trait Client {
     /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
     fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Self::Error>;
 
-    /// Writes the Float24 gain-correction factor for sense resistor 1 or 2 (`RS1GC` or
-    /// `RS2GC`, Table 72). The factor is dimensionless and must be positive and finite.
-    /// Apply the change with an `ADJUPD` pulse while the device is in STANDBY.
-    fn write_shunt_gain_correction(&mut self, channel: Channel, correction_factor: f32) -> Result<(), Self::Error>;
-
-    /// Calculates `nominal_ohms / actual_ohms` and writes it to `RS1GC` or `RS2GC`.
-    /// This directly implements the shunt-calibration calculation shown below Table 72.
-    fn write_shunt_gain_correction_from_resistances(
+    /// Writes the Float24 gain correction for sense resistor 1 or 2 (`RS1GC` or `RS2GC`,
+    /// Table 72). Construct `correction` from either a dimensionless factor or the nominal
+    /// and actual shunt resistances. Apply the change with an `ADJUPD` pulse while the device
+    /// is in STANDBY.
+    fn write_shunt_gain_correction(
         &mut self,
         channel: Channel,
-        nominal_ohms: f32,
-        actual_ohms: f32,
+        correction: ShuntGainCorrection,
     ) -> Result<(), Self::Error>;
 
     /// Calculates and writes `RSRATIO = RS1 / RS2` as Float24. This factor is used when
@@ -1681,8 +2163,7 @@ pub trait Client {
     fn write_charge_thresholds(
         &mut self,
         accumulator: ChargeAccumulator,
-        low_coulombs: f64,
-        high_coulombs: f64,
+        thresholds: ThresholdPair<f64>,
         shunt_ohms: f64,
         clock: AccumulatorClock,
     ) -> Result<(), Self::Error>;
@@ -1692,8 +2173,7 @@ pub trait Client {
     fn write_energy_thresholds(
         &mut self,
         accumulator: EnergyAccumulator,
-        low_joules: f64,
-        high_joules: f64,
+        thresholds: ThresholdPair<f64>,
         shunt_ohms: f64,
         clock: AccumulatorClock,
     ) -> Result<(), Self::Error>;
@@ -1702,7 +2182,7 @@ pub trait Client {
     fn write_time_threshold(
         &mut self,
         time_base: TimeBase,
-        seconds: f64,
+        threshold: Threshold<f64>,
         clock: AccumulatorClock,
     ) -> Result<(), Self::Error>;
 
@@ -1712,8 +2192,7 @@ pub trait Client {
     fn write_current_thresholds(
         &mut self,
         channel: Channel,
-        low_amperes: f32,
-        high_amperes: f32,
+        thresholds: ThresholdPair<f32>,
         shunt_ohms: f32,
     ) -> Result<(), Self::Error>;
 
@@ -1723,8 +2202,7 @@ pub trait Client {
     fn write_power_thresholds(
         &mut self,
         channel: Channel,
-        low_watts: f32,
-        high_watts: f32,
+        thresholds: ThresholdPair<f32>,
         shunt_ohms: f32,
     ) -> Result<(), Self::Error>;
 
@@ -1733,25 +2211,23 @@ pub trait Client {
     fn write_power_as_voltage_thresholds(
         &mut self,
         channel: Channel,
-        low_volts: f32,
-        high_volts: f32,
+        thresholds: ThresholdPair<f32>,
     ) -> Result<(), Self::Error>;
 
     /// Writes the BAT low/high threshold pair in volts.
-    fn write_battery_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Self::Error>;
+    fn write_battery_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
 
     /// Writes the die-temperature low/high threshold pair in degrees Celsius.
-    fn write_temperature_thresholds(&mut self, low_celsius: f32, high_celsius: f32) -> Result<(), Self::Error>;
+    fn write_temperature_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
 
     /// Writes the A/DVCC low/high threshold pair in volts.
-    fn write_vcc_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Self::Error>;
+    fn write_vcc_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
 
     /// Writes a SLOT1/SLOT2 low/high threshold pair in volts (corresponding `NTCx` clear).
     fn write_slot_voltage_thresholds(
         &mut self,
         slot: Channel,
-        low_volts: f32,
-        high_volts: f32,
+        thresholds: ThresholdPair<f32>,
     ) -> Result<(), Self::Error>;
 
     /// Writes a SLOT1/SLOT2 low/high threshold pair in degrees Celsius
@@ -1759,8 +2235,7 @@ pub trait Client {
     fn write_slot_temperature_thresholds(
         &mut self,
         slot: Channel,
-        low_celsius: f32,
-        high_celsius: f32,
+        thresholds: ThresholdPair<f32>,
     ) -> Result<(), Self::Error>;
 
     /// Writes the Fast AUX mux selection (FAMUXP, FAMUXN).
@@ -1778,13 +2253,29 @@ pub trait Client {
     /// reads (datasheet Tables 57 & 58). NTCs typically use `(Vx, Agnd)`.
     fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Self::Error>;
 
-    /// Writes GPIO Control
-    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error>;
+    /// Writes GPIO1 through GPIO4 control (`FGPIOCTRL`, datasheet Table 63).
+    ///
+    /// This write also transfers the previously written `FCURGPIOCTRL` value into the
+    /// device's active configuration. Keep at least 1 ms between writes to `FGPIOCTRL`.
+    fn write_gpio_ctrl(&mut self, gpio: GpioControlRegister) -> Result<(), Self::Error>;
 
-    /// Writes GPIO5 Control Mode
-    fn write_gpio5_config(&mut self, config: u8) -> Result<(), Self::Error>;
+    /// Writes GPIO5 and MUX current-source control (`FCURGPIOCTRL`, datasheet Table 62).
+    ///
+    /// The value does not become active until `FGPIOCTRL` is subsequently written. Prefer
+    /// [`write_gpio_controls`](Self::write_gpio_controls) when configuring both registers.
+    fn write_gpio5_config(&mut self, config: CurGpioControlRegister) -> Result<(), Self::Error>;
 
-    /// Writes GPIO4 Heartbeat
+    /// Writes `FCURGPIOCTRL` and `FGPIOCTRL` in one burst, as recommended by the datasheet.
+    ///
+    /// Writing the second byte makes both configurations active. Keep at least 1 ms between
+    /// calls that write `FGPIOCTRL`.
+    fn write_gpio_controls(
+        &mut self,
+        gpio5_and_current: CurGpioControlRegister,
+        gpio1_to_4: GpioControlRegister,
+    ) -> Result<(), Self::Error>;
+
+    /// Enables or disables the GPIO4 heartbeat (`GPIO4HBCTRL`, datasheet Table 61).
     fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error>;
 
     /// Writes both overcurrent-comparator control registers (`OCC1CTRL`/`OCC2CTRL`) in
@@ -2004,26 +2495,31 @@ where
         self.write_bytes(RegAddressP1::AdcConf, &value.into_bytes())
     }
 
-    fn write_shunt_gain_correction(&mut self, channel: Channel, correction_factor: f32) -> Result<(), Error<B>> {
+    fn write_shunt_gain_correction(
+        &mut self,
+        channel: Channel,
+        correction: ShuntGainCorrection,
+    ) -> Result<(), Error<B>> {
         let address = match channel {
             Channel::One => RegAddressP1::Rs1Gc,
             Channel::Two => RegAddressP1::Rs2Gc,
         };
+        let correction_factor = match correction.source {
+            ShuntGainCorrectionSource::CorrectionFactor(correction_factor) => correction_factor,
+            ShuntGainCorrectionSource::Resistances {
+                nominal_ohms,
+                actual_ohms,
+            } => PositiveRatio::try_from_parts(nominal_ohms, actual_ohms)
+                .map_err(|_| Error::InvalidGainCorrection)?
+                .value(),
+        };
         self.write_gain_factor(address, correction_factor)
     }
 
-    fn write_shunt_gain_correction_from_resistances(
-        &mut self,
-        channel: Channel,
-        nominal_ohms: f32,
-        actual_ohms: f32,
-    ) -> Result<(), Error<B>> {
-        let correction_factor = Self::positive_ratio(nominal_ohms, actual_ohms)?;
-        self.write_shunt_gain_correction(channel, correction_factor)
-    }
-
     fn write_shunt_ratio(&mut self, rs1_ohms: f32, rs2_ohms: f32) -> Result<(), Error<B>> {
-        let ratio = Self::positive_ratio(rs1_ohms, rs2_ohms)?;
+        let ratio = PositiveRatio::try_from_parts(rs1_ohms, rs2_ohms)
+            .map_err(|_| Error::InvalidGainCorrection)?
+            .value();
         self.write_gain_factor(RegAddressP1::RsRatio, ratio)
     }
 
@@ -2052,79 +2548,78 @@ where
     fn write_charge_thresholds(
         &mut self,
         accumulator: ChargeAccumulator,
-        low_coulombs: f64,
-        high_coulombs: f64,
+        thresholds: ThresholdPair<f64>,
         shunt_ohms: f64,
         clock: AccumulatorClock,
     ) -> Result<(), Error<B>> {
-        let (charge_lsb, _, _) = Self::accumulator_lsbs(clock)?;
+        let (charge_lsb, _, _) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
         let lsb_coulombs = Self::divide_lsb_by_shunt(charge_lsb, shunt_ohms)?;
         match accumulator {
-            ChargeAccumulator::Charge1 => {
-                self.write_signed_48_threshold_pair(RegAddressP1::C1Th, low_coulombs, high_coulombs, lsb_coulombs)
+            ChargeAccumulator::Charge1 | ChargeAccumulator::Charge2 => {
+                let address = match accumulator {
+                    ChargeAccumulator::Charge1 => RegAddressP1::C1Th,
+                    ChargeAccumulator::Charge2 => RegAddressP1::C2Th,
+                    ChargeAccumulator::Charge3 => unreachable!(),
+                };
+                let encoded: Signed48Thresholds = thresholds.quantize(lsb_coulombs)?;
+                self.write_bytes(address, &encoded.to_be_bytes())
             }
-            ChargeAccumulator::Charge2 => {
-                self.write_signed_48_threshold_pair(RegAddressP1::C2Th, low_coulombs, high_coulombs, lsb_coulombs)
+            ChargeAccumulator::Charge3 => {
+                let encoded: Signed64Thresholds = thresholds.quantize(lsb_coulombs)?;
+                self.write_bytes(RegAddressP1::C3Th, &encoded.high_to_be_bytes())?;
+                self.write_bytes(RegAddressP1::C3Tl, &encoded.low_to_be_bytes())
             }
-            ChargeAccumulator::Charge3 => self.write_signed_64_threshold_pair(
-                RegAddressP1::C3Th,
-                RegAddressP1::C3Tl,
-                low_coulombs,
-                high_coulombs,
-                lsb_coulombs,
-            ),
         }
     }
 
     fn write_energy_thresholds(
         &mut self,
         accumulator: EnergyAccumulator,
-        low_joules: f64,
-        high_joules: f64,
+        thresholds: ThresholdPair<f64>,
         shunt_ohms: f64,
         clock: AccumulatorClock,
     ) -> Result<(), Error<B>> {
-        let (_, energy_lsb, _) = Self::accumulator_lsbs(clock)?;
+        let (_, energy_lsb, _) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
         let lsb_joules = Self::divide_lsb_by_shunt(energy_lsb, shunt_ohms)?;
         match accumulator {
-            EnergyAccumulator::Energy1 => {
-                self.write_signed_48_threshold_pair(RegAddressP1::E1Th, low_joules, high_joules, lsb_joules)
+            EnergyAccumulator::Energy1 | EnergyAccumulator::Energy2 => {
+                let address = match accumulator {
+                    EnergyAccumulator::Energy1 => RegAddressP1::E1Th,
+                    EnergyAccumulator::Energy2 => RegAddressP1::E2Th,
+                    EnergyAccumulator::Energy4 => unreachable!(),
+                };
+                let encoded: Signed48Thresholds = thresholds.quantize(lsb_joules)?;
+                self.write_bytes(address, &encoded.to_be_bytes())
             }
-            EnergyAccumulator::Energy2 => {
-                self.write_signed_48_threshold_pair(RegAddressP1::E2Th, low_joules, high_joules, lsb_joules)
+            EnergyAccumulator::Energy4 => {
+                let encoded: Signed64Thresholds = thresholds.quantize(lsb_joules)?;
+                self.write_bytes(RegAddressP1::E4Th, &encoded.high_to_be_bytes())?;
+                self.write_bytes(RegAddressP1::E4Tl, &encoded.low_to_be_bytes())
             }
-            EnergyAccumulator::Energy4 => self.write_signed_64_threshold_pair(
-                RegAddressP1::E4Th,
-                RegAddressP1::E4Tl,
-                low_joules,
-                high_joules,
-                lsb_joules,
-            ),
         }
     }
 
     fn write_time_threshold(
         &mut self,
         time_base: TimeBase,
-        seconds: f64,
+        threshold: Threshold<f64>,
         clock: AccumulatorClock,
     ) -> Result<(), Error<B>> {
-        let (_, _, time_lsb) = Self::accumulator_lsbs(clock)?;
-        let raw = Self::quantize_unsigned_32(seconds, time_lsb)?;
+        let (_, _, time_lsb) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
+        let encoded: Unsigned32Threshold = threshold.quantize(time_lsb)?;
         let address = match time_base {
             TimeBase::Time1 => RegAddressP1::Tb1Th,
             TimeBase::Time2 => RegAddressP1::Tb2Th,
             TimeBase::Time3 => RegAddressP1::Tb3Th,
             TimeBase::Time4 => RegAddressP1::Tb4Th,
         };
-        self.write_bytes(address, &raw.to_be_bytes())
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
     fn write_current_thresholds(
         &mut self,
         channel: Channel,
-        low_amperes: f32,
-        high_amperes: f32,
+        thresholds: ThresholdPair<f32>,
         shunt_ohms: f32,
     ) -> Result<(), Error<B>> {
         let lsb_amperes =
@@ -2133,14 +2628,14 @@ where
             Channel::One => RegAddressP1::I1Th,
             Channel::Two => RegAddressP1::I2Th,
         };
-        self.write_signed_16_threshold_pair(address, low_amperes as f64, high_amperes as f64, lsb_amperes)
+        let encoded: Signed16Thresholds = thresholds.quantize(lsb_amperes)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
     fn write_power_thresholds(
         &mut self,
         channel: Channel,
-        low_watts: f32,
-        high_watts: f32,
+        thresholds: ThresholdPair<f32>,
         shunt_ohms: f32,
     ) -> Result<(), Error<B>> {
         let lsb_watts = Self::divide_lsb_by_shunt(
@@ -2151,88 +2646,62 @@ where
             Channel::One => RegAddressP1::P1Th,
             Channel::Two => RegAddressP1::P2Th,
         };
-        self.write_signed_16_threshold_pair(address, low_watts as f64, high_watts as f64, lsb_watts)
+        let encoded: Signed16Thresholds = thresholds.quantize(lsb_watts)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
     fn write_power_as_voltage_thresholds(
         &mut self,
         channel: Channel,
-        low_volts: f32,
-        high_volts: f32,
+        thresholds: ThresholdPair<f32>,
     ) -> Result<(), Error<B>> {
         let address = match channel {
             Channel::One => RegAddressP1::P1Th,
             Channel::Two => RegAddressP1::P2Th,
         };
-        self.write_signed_16_threshold_pair(
-            address,
-            low_volts as f64,
-            high_volts as f64,
-            PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS as f64,
-        )
+        let encoded: Signed16Thresholds = thresholds.quantize(PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
-    fn write_battery_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Error<B>> {
-        self.write_signed_16_threshold_pair(
-            RegAddressP1::BatTh,
-            low_volts as f64,
-            high_volts as f64,
-            BatteryVoltage::LSB_VOLTS as f64,
-        )
+    fn write_battery_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let encoded: Signed16Thresholds = thresholds.quantize(BatteryVoltage::LSB_VOLTS as f64)?;
+        self.write_bytes(RegAddressP1::BatTh, &encoded.to_be_bytes())
     }
 
-    fn write_temperature_thresholds(&mut self, low_celsius: f32, high_celsius: f32) -> Result<(), Error<B>> {
-        self.write_signed_16_threshold_pair(
-            RegAddressP1::TempTh,
-            (low_celsius + DieTemperature::ZERO_CELSIUS_KELVIN) as f64,
-            (high_celsius + DieTemperature::ZERO_CELSIUS_KELVIN) as f64,
-            DieTemperature::LSB_KELVIN as f64,
-        )
+    fn write_temperature_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let kelvin = ThresholdPair::new(
+            thresholds.low + DieTemperature::ZERO_CELSIUS_KELVIN,
+            thresholds.high + DieTemperature::ZERO_CELSIUS_KELVIN,
+        );
+        let encoded: Signed16Thresholds = kelvin.quantize(DieTemperature::LSB_KELVIN as f64)?;
+        self.write_bytes(RegAddressP1::TempTh, &encoded.to_be_bytes())
     }
 
-    fn write_vcc_thresholds(&mut self, low_volts: f32, high_volts: f32) -> Result<(), Error<B>> {
-        self.write_signed_16_threshold_pair(
-            RegAddressP1::VccTh,
-            low_volts as f64,
-            high_volts as f64,
-            SupplyVoltage::LSB_VOLTS as f64,
-        )
+    fn write_vcc_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let encoded: Signed16Thresholds = thresholds.quantize(SupplyVoltage::LSB_VOLTS as f64)?;
+        self.write_bytes(RegAddressP1::VccTh, &encoded.to_be_bytes())
     }
 
-    fn write_slot_voltage_thresholds(
-        &mut self,
-        slot: Channel,
-        low_volts: f32,
-        high_volts: f32,
-    ) -> Result<(), Error<B>> {
+    fn write_slot_voltage_thresholds(&mut self, slot: Channel, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
         let address = match slot {
             Channel::One => RegAddressP1::Slot1Th,
             Channel::Two => RegAddressP1::Slot2Th,
         };
-        self.write_signed_16_threshold_pair(
-            address,
-            low_volts as f64,
-            high_volts as f64,
-            SlotValue::LSB_VOLTS as f64,
-        )
+        let encoded: Signed16Thresholds = thresholds.quantize(SlotValue::LSB_VOLTS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
     fn write_slot_temperature_thresholds(
         &mut self,
         slot: Channel,
-        low_celsius: f32,
-        high_celsius: f32,
+        thresholds: ThresholdPair<f32>,
     ) -> Result<(), Error<B>> {
         let address = match slot {
             Channel::One => RegAddressP1::Slot1Th,
             Channel::Two => RegAddressP1::Slot2Th,
         };
-        self.write_signed_16_threshold_pair(
-            address,
-            low_celsius as f64,
-            high_celsius as f64,
-            SlotValue::LSB_DEGREES_CELSIUS as f64,
-        )
+        let encoded: Signed16Thresholds = thresholds.quantize(SlotValue::LSB_DEGREES_CELSIUS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
     }
 
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Error<B>> {
@@ -2286,20 +2755,26 @@ where
         self.write_bytes(addr_n, &[negative as u8, positive as u8])
     }
 
-    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
-        self.write_bytes(RegAddressP0::FGpioCtrl, &[gpio])
+    fn write_gpio_ctrl(&mut self, gpio: GpioControlRegister) -> Result<(), Self::Error> {
+        self.write_bytes(RegAddressP0::FGpioCtrl, &gpio.into_bytes())
     }
 
-    fn write_gpio5_config(&mut self, config: u8) -> Result<(), Self::Error> {
-        self.write_bytes(RegAddressP0::FCurGpioCtrl, &[config])
+    fn write_gpio5_config(&mut self, config: CurGpioControlRegister) -> Result<(), Self::Error> {
+        self.write_bytes(RegAddressP0::FCurGpioCtrl, &config.into_bytes())
+    }
+
+    fn write_gpio_controls(
+        &mut self,
+        gpio5_and_current: CurGpioControlRegister,
+        gpio1_to_4: GpioControlRegister,
+    ) -> Result<(), Self::Error> {
+        let bytes = [gpio5_and_current.into_bytes()[0], gpio1_to_4.into_bytes()[0]];
+        self.write_bytes(RegAddressP0::FCurGpioCtrl, &bytes)
     }
 
     fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error> {
-        if hb {
-            self.write_bytes(RegAddressP0::FCurGpioCtrl, &[0b1])
-        } else {
-            self.write_bytes(RegAddressP0::FCurGpioCtrl, &[0b0])
-        }
+        let config = Gpio4HeartbeatControlRegister::new().with_gpio4_hb_enable(hb);
+        self.write_bytes(RegAddressP0::Gpio4HbCtrl, &config.into_bytes())
     }
 
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
@@ -2521,148 +2996,11 @@ where
         self.write_bytes(address, &encoded)
     }
 
-    fn positive_ratio(numerator: f32, denominator: f32) -> Result<f32, Error<B>> {
-        if !numerator.is_finite() || numerator <= 0.0 || !denominator.is_finite() || denominator <= 0.0 {
-            return Err(Error::InvalidGainCorrection);
-        }
-        let ratio = numerator / denominator;
-        if !ratio.is_finite() || ratio <= 0.0 {
-            return Err(Error::InvalidGainCorrection);
-        }
-        Ok(ratio)
-    }
-
-    fn accumulator_lsbs(clock: AccumulatorClock) -> Result<(f64, f64, f64), Error<B>> {
-        match clock {
-            AccumulatorClock::Internal => Ok((
-                AccumulatedCharge::LSB_VOLT_SECONDS,
-                AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS,
-                AccumulatedTime::LSB_SECONDS,
-            )),
-            AccumulatorClock::External { frequency_hz, pre, div } => {
-                if !frequency_hz.is_finite() || frequency_hz <= 0.0 || pre > 7 || div > 31 {
-                    return Err(Error::InvalidThreshold);
-                }
-                let clock_factor = f64::from(1u16 << pre) * (f64::from(div) + 1.0) / frequency_hz;
-                Ok((
-                    1.21899e-5 * clock_factor,
-                    7.4895e-5 * clock_factor,
-                    12.8315 * clock_factor,
-                ))
-            }
-        }
-    }
-
     fn divide_lsb_by_shunt(lsb: f64, shunt_ohms: f64) -> Result<f64, Error<B>> {
         if !shunt_ohms.is_finite() || shunt_ohms <= 0.0 {
             return Err(Error::InvalidThreshold);
         }
         Ok(lsb / shunt_ohms)
-    }
-
-    fn quantize_signed(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, Error<B>> {
-        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
-            return Err(Error::InvalidThreshold);
-        }
-        let scaled = value / lsb;
-        if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
-            return Err(Error::InvalidThreshold);
-        }
-        Ok(if scaled >= 0.0 {
-            (scaled + 0.5) as i64
-        } else {
-            (scaled - 0.5) as i64
-        })
-    }
-
-    fn quantize_signed_16(value: f64, lsb: f64) -> Result<i16, Error<B>> {
-        Self::quantize_signed(value, lsb, f64::from(i16::MIN), f64::from(i16::MAX)).map(|value| value as i16)
-    }
-
-    fn quantize_signed_48(value: f64, lsb: f64) -> Result<i64, Error<B>> {
-        const MIN: f64 = -((1u64 << 47) as f64);
-        const MAX: f64 = ((1u64 << 47) - 1) as f64;
-        Self::quantize_signed(value, lsb, MIN, MAX)
-    }
-
-    fn quantize_signed_64(value: f64, lsb: f64) -> Result<i64, Error<B>> {
-        // `i64::MAX as f64` rounds up to 2^63, so use an exclusive upper check before the cast.
-        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
-            return Err(Error::InvalidThreshold);
-        }
-        let scaled = value / lsb;
-        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&scaled) {
-            return Err(Error::InvalidThreshold);
-        }
-        Ok(if scaled >= 0.0 {
-            (scaled + 0.5) as i64
-        } else {
-            (scaled - 0.5) as i64
-        })
-    }
-
-    fn quantize_unsigned_32(value: f64, lsb: f64) -> Result<u32, Error<B>> {
-        if !value.is_finite() || !lsb.is_finite() || lsb <= 0.0 {
-            return Err(Error::InvalidThreshold);
-        }
-        let scaled = value / lsb;
-        if value < 0.0 || scaled >= f64::from(u32::MAX) + 0.5 {
-            return Err(Error::InvalidThreshold);
-        }
-        Ok((scaled + 0.5) as u32)
-    }
-
-    fn write_signed_16_threshold_pair(
-        &mut self,
-        high_address: RegAddressP1,
-        low: f64,
-        high: f64,
-        lsb: f64,
-    ) -> Result<(), Error<B>> {
-        if low > high {
-            return Err(Error::InvalidThreshold);
-        }
-        let high = Self::quantize_signed_16(high, lsb)?;
-        let low = Self::quantize_signed_16(low, lsb)?;
-        let mut bytes = [0u8; 4];
-        bytes[..2].copy_from_slice(&high.to_be_bytes());
-        bytes[2..].copy_from_slice(&low.to_be_bytes());
-        self.write_bytes(high_address, &bytes)
-    }
-
-    fn write_signed_48_threshold_pair(
-        &mut self,
-        high_address: RegAddressP1,
-        low: f64,
-        high: f64,
-        lsb: f64,
-    ) -> Result<(), Error<B>> {
-        if low > high {
-            return Err(Error::InvalidThreshold);
-        }
-        let high = Self::quantize_signed_48(high, lsb)?.to_be_bytes();
-        let low = Self::quantize_signed_48(low, lsb)?.to_be_bytes();
-        let mut bytes = [0u8; 12];
-        bytes[..6].copy_from_slice(&high[2..]);
-        bytes[6..].copy_from_slice(&low[2..]);
-        self.write_bytes(high_address, &bytes)
-    }
-
-    fn write_signed_64_threshold_pair(
-        &mut self,
-        high_address: RegAddressP1,
-        low_address: RegAddressP1,
-        low: f64,
-        high: f64,
-        lsb: f64,
-    ) -> Result<(), Error<B>> {
-        if low > high {
-            return Err(Error::InvalidThreshold);
-        }
-        let high = Self::quantize_signed_64(high, lsb)?.to_be_bytes();
-        let low = Self::quantize_signed_64(low, lsb)?.to_be_bytes();
-        self.write_bytes(high_address, &high)?;
-        self.write_bytes(low_address, &low)
     }
 
     /// Drains up to `N` I1 FIFO samples (3 bytes each: MSB, LSB, TAG). Stops at the first

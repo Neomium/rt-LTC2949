@@ -16,9 +16,11 @@
 
 use crate::client::{
     AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AccumulatorClock, AdcConfiguration, BatteryVoltage, Channel,
-    ChargeAccumulator, Client, CurrentSenseVoltage, DcmdId, DieTemperature, EnergyAccumulator, Error as ClientError,
-    FastControlRegister, FifoTag, MuxGainSlot, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig,
-    PowerOrVoltage, ShuntTcConfig, SlotValue, SupplyVoltage, TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    ChargeAccumulator, Client, CurGpioControlRegister, CurrentSenseVoltage, DcmdId, DieTemperature, EnergyAccumulator,
+    Error as ClientError, FastControlRegister, FifoTag, GpioControlRegister, GpioCtrl, MuxGainSlot, MuxInput,
+    NtcConfig, OpsControlRegister, OverCurrentConfig, PositiveRatio, PowerOrVoltage, Quantize, ShuntGainCorrection,
+    ShuntTcConfig, Signed16Thresholds, SlotValue, SupplyVoltage, Threshold, ThresholdConversionError, ThresholdPair,
+    TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::{BusError, MockSPIDevice};
@@ -450,14 +452,57 @@ fn write_fast_aux_mux_propagates_bus_error() {
 
 #[test]
 fn write_gpio_ctrl_emits_dcmd_to_fgpioctrl() {
-    // FGPIOCTRL has four 2-bit GPIO control fields. 0x03 sets GPIO1CTRL=0b11
-    // (drive GPIO1 high) and leaves GPIO2..GPIO4 at 0b00 (tristate).
+    // 0b00_10_01_11 maps GPIO1..GPIO4 from the least-significant field upward.
+    let config = GpioControlRegister::new()
+        .with_gpio1_ctrl(GpioCtrl::High)
+        .with_gpio2_ctrl(GpioCtrl::Low)
+        .with_gpio3_ctrl(GpioCtrl::Toggle400kHz)
+        .with_gpio4_ctrl(GpioCtrl::Tristate);
+    assert_eq!([0b00_10_01_11], config.into_bytes());
+
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
-    expect_write(&mut mock, dcmd_write_bytes(0xF2, &[0x03]));
+    expect_write(&mut mock, dcmd_write_bytes(0xF2, &[0b00_10_01_11]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_gpio_ctrl(0x03).unwrap();
+    client.write_gpio_ctrl(config).unwrap();
+}
+
+#[test]
+fn write_gpio_controls_encodes_gpio5_and_current_sources_in_one_burst() {
+    let gpio5_and_current = CurGpioControlRegister::new()
+        .with_gpio5_ctrl(GpioCtrl::Toggle400kHz)
+        .with_mux_p_cur_pol(true)
+        .with_mux_p_cur_en(true)
+        .with_mux_n_cur_pol(false)
+        .with_mux_n_cur_en(true);
+    // GPIO5CTRL=10, reserved=00, MUXPCURPOL=1, MUXPCUREN=1,
+    // MUXNCURPOL=0, MUXNCUREN=1.
+    assert_eq!([0b10_11_00_10], gpio5_and_current.into_bytes());
+
+    let gpio1_to_4 = GpioControlRegister::new()
+        .with_gpio1_ctrl(GpioCtrl::Low)
+        .with_gpio2_ctrl(GpioCtrl::High)
+        .with_gpio3_ctrl(GpioCtrl::Tristate)
+        .with_gpio4_ctrl(GpioCtrl::Toggle400kHz);
+    assert_eq!([0b10_00_11_01], gpio1_to_4.into_bytes());
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF1, &[0b10_11_00_10, 0b10_00_11_01]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio_controls(gpio5_and_current, gpio1_to_4).unwrap();
+}
+
+#[test]
+fn write_gpio4_hb() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xE8, &[0x01]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio4_hb(true).unwrap();
 }
 
 #[test]
@@ -521,46 +566,63 @@ fn write_non_accumulated_thresholds_convert_si_units_and_target_table67_addresse
     client
         .write_current_thresholds(
             Channel::One,
-            -10.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
-            20.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+            ThresholdPair::new(
+                -10.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+                20.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+            ),
             shunt,
         )
         .unwrap();
     client
         .write_power_thresholds(
             Channel::Two,
-            -30.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
-            40.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+            ThresholdPair::new(
+                -30.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+                40.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+            ),
             shunt,
         )
         .unwrap();
     client
         .write_power_as_voltage_thresholds(
             Channel::One,
-            -50.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
-            60.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+            ThresholdPair::new(
+                -50.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+                60.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+            ),
         )
         .unwrap();
     client
-        .write_battery_thresholds(-70.0 * BatteryVoltage::LSB_VOLTS, 80.0 * BatteryVoltage::LSB_VOLTS)
+        .write_battery_thresholds(ThresholdPair::new(
+            -70.0 * BatteryVoltage::LSB_VOLTS,
+            80.0 * BatteryVoltage::LSB_VOLTS,
+        ))
         .unwrap();
     client
-        .write_temperature_thresholds(
+        .write_temperature_thresholds(ThresholdPair::new(
             -DieTemperature::ZERO_CELSIUS_KELVIN,
             1500.0 * DieTemperature::LSB_KELVIN - DieTemperature::ZERO_CELSIUS_KELVIN,
+        ))
+        .unwrap();
+    client
+        .write_vcc_thresholds(ThresholdPair::new(
+            100.0 * SupplyVoltage::LSB_VOLTS,
+            200.0 * SupplyVoltage::LSB_VOLTS,
+        ))
+        .unwrap();
+    client
+        .write_slot_voltage_thresholds(
+            Channel::One,
+            ThresholdPair::new(-90.0 * SlotValue::LSB_VOLTS, 100.0 * SlotValue::LSB_VOLTS),
         )
-        .unwrap();
-    client
-        .write_vcc_thresholds(100.0 * SupplyVoltage::LSB_VOLTS, 200.0 * SupplyVoltage::LSB_VOLTS)
-        .unwrap();
-    client
-        .write_slot_voltage_thresholds(Channel::One, -90.0 * SlotValue::LSB_VOLTS, 100.0 * SlotValue::LSB_VOLTS)
         .unwrap();
     client
         .write_slot_temperature_thresholds(
             Channel::Two,
-            -110.0 * SlotValue::LSB_DEGREES_CELSIUS,
-            120.0 * SlotValue::LSB_DEGREES_CELSIUS,
+            ThresholdPair::new(
+                -110.0 * SlotValue::LSB_DEGREES_CELSIUS,
+                120.0 * SlotValue::LSB_DEGREES_CELSIUS,
+            ),
         )
         .unwrap();
 }
@@ -576,7 +638,9 @@ fn half_amp_current_threshold_uses_3_8uv_lsb() {
     expect_write(&mut mock, dcmd_write_bytes(0x80, &[0x00, 0x0D, 0x00, 0x00]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_current_thresholds(Channel::One, 0.0, 0.5, 100e-6).unwrap();
+    client
+        .write_current_thresholds(Channel::One, ThresholdPair::new(0.0, 0.5), 100e-6)
+        .unwrap();
 }
 
 #[test]
@@ -622,8 +686,7 @@ fn write_accumulator_thresholds_cover_all_table67_accumulators() {
         client
             .write_charge_thresholds(
                 accumulator,
-                low * charge_lsb,
-                high * charge_lsb,
+                ThresholdPair::new(low * charge_lsb, high * charge_lsb),
                 shunt,
                 AccumulatorClock::Internal,
             )
@@ -637,8 +700,7 @@ fn write_accumulator_thresholds_cover_all_table67_accumulators() {
         client
             .write_energy_thresholds(
                 accumulator,
-                low * energy_lsb,
-                high * energy_lsb,
+                ThresholdPair::new(low * energy_lsb, high * energy_lsb),
                 shunt,
                 AccumulatorClock::Internal,
             )
@@ -651,7 +713,7 @@ fn write_accumulator_thresholds_cover_all_table67_accumulators() {
         (TimeBase::Time4, 17.0),
     ] {
         client
-            .write_time_threshold(time_base, raw * time_lsb, AccumulatorClock::Internal)
+            .write_time_threshold(time_base, Threshold::new(raw * time_lsb), AccumulatorClock::Internal)
             .unwrap();
     }
 }
@@ -669,7 +731,9 @@ fn external_clock_threshold_scaling_uses_table27_formula() {
     };
     let time_lsb = 12.8315 / 10e6 * 16.0 * 20.0;
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_time_threshold(TimeBase::Time1, 10.0 * time_lsb, clock).unwrap();
+    client
+        .write_time_threshold(TimeBase::Time1, Threshold::new(10.0 * time_lsb), clock)
+        .unwrap();
 }
 
 #[test]
@@ -677,17 +741,38 @@ fn invalid_threshold_is_rejected_before_bus_access() {
     let mock = MockSPIDevice::new();
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     assert!(matches!(
-        client.write_battery_thresholds(2.0, 1.0),
+        client.write_battery_thresholds(ThresholdPair::new(2.0, 1.0)),
         Err(ClientError::InvalidThreshold)
     ));
     assert!(matches!(
-        client.write_current_thresholds(Channel::One, -1.0, 1.0, 0.0),
+        client.write_current_thresholds(Channel::One, ThresholdPair::new(-1.0, 1.0), 0.0),
         Err(ClientError::InvalidThreshold)
     ));
     assert!(matches!(
-        client.write_time_threshold(TimeBase::Time1, f64::NAN, AccumulatorClock::Internal),
+        client.write_time_threshold(TimeBase::Time1, Threshold::new(f64::NAN), AccumulatorClock::Internal),
         Err(ClientError::InvalidThreshold)
     ));
+}
+
+#[test]
+fn threshold_pair_quantization_reports_conversion_errors() {
+    let encoded: Signed16Thresholds = ThresholdPair::new(-1.5_f64, 2.5).quantize(1.0).unwrap();
+    assert_eq!(-2, encoded.low());
+    assert_eq!(3, encoded.high());
+    assert_eq!([0x00, 0x03, 0xFF, 0xFE], encoded.to_be_bytes());
+
+    assert_eq!(
+        Err(ThresholdConversionError::LowAboveHigh),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(2.0_f64, 1.0), 1.0)
+    );
+    assert_eq!(
+        Err(ThresholdConversionError::InvalidScale),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(0.0_f64, 1.0), 0.0)
+    );
+    assert_eq!(
+        Err(ThresholdConversionError::OutOfRange),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(0.0_f64, 40_000.0), 1.0)
+    );
 }
 
 #[test]
@@ -700,12 +785,28 @@ fn write_gain_corrections_match_table72_addresses_and_examples() {
     expect_write(&mut mock, dcmd_write_bytes(0xB9, &[0x3E, 0xE6, 0x66])); // 0.95
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    let calibrated_shunt = ShuntGainCorrection::from_resistances(100e-6, 102e-6);
+    assert_f32_approx_eq(calibrated_shunt.correction_factor(), 100.0 / 102.0);
+    client.write_shunt_gain_correction(Channel::One, calibrated_shunt).unwrap();
     client
-        .write_shunt_gain_correction_from_resistances(Channel::One, 100e-6, 102e-6)
+        .write_shunt_gain_correction(Channel::Two, ShuntGainCorrection::from_correction_factor(1.024))
         .unwrap();
-    client.write_shunt_gain_correction(Channel::Two, 1.024).unwrap();
     client.write_shunt_ratio(100e-6, 10e-3).unwrap();
     client.write_battery_gain_correction(0.95).unwrap();
+}
+
+#[test]
+fn positive_ratio_validates_and_stores_the_ratio() {
+    let ratio = PositiveRatio::try_from_parts(100e-6, 10e-3).unwrap();
+    assert_f32_approx_eq(ratio.value(), 100e-6 / 10e-3);
+    assert_eq!(
+        Err(crate::client::PositiveRatioError::NonPositiveOrNonFinite),
+        PositiveRatio::try_from_ratio(0.0)
+    );
+    assert_eq!(
+        Err(crate::client::PositiveRatioError::NonPositiveOrNonFinite),
+        PositiveRatio::try_from_parts(-1.0, 2.0)
+    );
 }
 
 #[test]
@@ -741,11 +842,16 @@ fn invalid_gain_correction_is_rejected_before_bus_access() {
     let mock = MockSPIDevice::new();
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     assert!(matches!(
-        client.write_shunt_gain_correction(Channel::One, f32::NAN),
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_correction_factor(f32::NAN)),
         Err(ClientError::InvalidGainCorrection)
     ));
     assert!(matches!(
-        client.write_shunt_gain_correction_from_resistances(Channel::One, 100e-6, 0.0),
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_resistances(100e-6, 0.0)),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    // Validate the source resistances individually, rather than accepting their positive ratio.
+    assert!(matches!(
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_resistances(-100e-6, -102e-6)),
         Err(ClientError::InvalidGainCorrection)
     ));
     assert!(matches!(
