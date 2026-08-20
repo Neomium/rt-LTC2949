@@ -469,6 +469,48 @@ fn write_gpio_ctrl_emits_dcmd_to_fgpioctrl() {
 }
 
 #[test]
+fn write_gpio5_config_emits_dcmd_to_fcurgpioctrl() {
+    let config = CurGpioControlRegister::new()
+        .with_gpio5_ctrl(GpioCtrl::Toggle400kHz)
+        .with_mux_p_cur_pol(true)
+        .with_mux_p_cur_en(false)
+        .with_mux_n_cur_pol(false)
+        .with_mux_n_cur_en(true);
+    // GPIO5CTRL=10, reserved=00, MUXPCURPOL=1, MUXPCUREN=0,
+    // MUXNCURPOL=0, MUXNCUREN=1.
+    assert_eq!([0b10_01_00_10], config.into_bytes());
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF1, &[0b10_01_00_10]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio5_config(config).unwrap();
+}
+
+#[test]
+fn write_gpio5_config_propagates_bus_error() {
+    let config = CurGpioControlRegister::new().with_gpio5_ctrl(GpioCtrl::High);
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    let expected = dcmd_write_bytes(0xF1, &[0x03]);
+    mock.expect_transaction().times(1).returning(move |ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(expected.as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_gpio5_config(config),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
+}
+
+#[test]
 fn write_gpio_controls_encodes_gpio5_and_current_sources_in_one_burst() {
     let gpio5_and_current = CurGpioControlRegister::new()
         .with_gpio5_ctrl(GpioCtrl::Toggle400kHz)
