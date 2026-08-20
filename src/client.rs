@@ -1063,6 +1063,29 @@ impl<T> ThresholdPair<T> {
     }
 }
 
+impl ThresholdPair<f64> {
+    fn quantize_signed_code(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, ThresholdConversionError> {
+        if !value.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+
+        let scaled = value / lsb;
+        if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
+            return Err(ThresholdConversionError::OutOfRange);
+        }
+
+        Ok(if scaled >= 0.0 {
+            (scaled + 0.5) as i64
+        } else {
+            (scaled - 0.5) as i64
+        })
+    }
+}
+
 /// Reason a physical threshold could not be converted to its register representation.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ThresholdConversionError {
@@ -1188,32 +1211,14 @@ impl Unsigned32Threshold {
     }
 }
 
-fn quantize_signed_code(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, ThresholdConversionError> {
-    if !value.is_finite() {
-        return Err(ThresholdConversionError::NonFiniteValue);
-    }
-    if !lsb.is_finite() || lsb <= 0.0 {
-        return Err(ThresholdConversionError::InvalidScale);
-    }
-    let scaled = value / lsb;
-    if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
-        return Err(ThresholdConversionError::OutOfRange);
-    }
-    Ok(if scaled >= 0.0 {
-        (scaled + 0.5) as i64
-    } else {
-        (scaled - 0.5) as i64
-    })
-}
-
 impl Quantize<Signed16Thresholds> for ThresholdPair<f64> {
     fn quantize(self, lsb: f64) -> Result<Signed16Thresholds, ThresholdConversionError> {
         if self.low > self.high {
             return Err(ThresholdConversionError::LowAboveHigh);
         }
         Ok(Signed16Thresholds {
-            high: quantize_signed_code(self.high, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
-            low: quantize_signed_code(self.low, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+            high: Self::quantize_signed_code(self.high, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+            low: Self::quantize_signed_code(self.low, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
         })
     }
 }
@@ -1232,8 +1237,8 @@ impl Quantize<Signed48Thresholds> for ThresholdPair<f64> {
             return Err(ThresholdConversionError::LowAboveHigh);
         }
         Ok(Signed48Thresholds {
-            high: quantize_signed_code(self.high, lsb, MIN, MAX)?,
-            low: quantize_signed_code(self.low, lsb, MIN, MAX)?,
+            high: Self::quantize_signed_code(self.high, lsb, MIN, MAX)?,
+            low: Self::quantize_signed_code(self.low, lsb, MIN, MAX)?,
         })
     }
 }
