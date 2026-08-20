@@ -149,17 +149,30 @@
 //!
 //! ## GPIO control
 //!
-//! [`Client::write_gpio_ctrl`] writes the raw `FGPIOCTRL` byte, which contains four 2-bit GPIO
-//! control fields. In this example `GPIO1CTRL = 0b11` drives GPIO1 high while the remaining
-//! fields stay `0b00` (tristate).
+//! [`Client::write_gpio_ctrl`] writes `FGPIOCTRL`, which contains four type-safe 2-bit GPIO
+//! control fields. In this example GPIO1 is driven high while the remaining GPIOs stay
+//! tristated.
 //!
 //! ```
-//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::client::{Client, GpioControlRegister, GpioCtrl, LTC2949};
 //! # use ltc2949::example::ExampleSPIDevice;
 //! let mut client = LTC2949::new(ExampleSPIDevice::default());
-//! let gpio_control = 0b00_00_00_11;
+//! let gpio_control = GpioControlRegister::new().with_gpio1_ctrl(GpioCtrl::High);
 //!
 //! client.write_gpio_ctrl(gpio_control).unwrap();
+//! ```
+//!
+//! [`Client::write_gpio5_config`] writes ´FCURGPIOCTRL´, which controls MUXP & MUXN Current sources and
+//! GPIO 5. Changes only tajke effect after ´FGPIOCTRL´, has been written, so [`Client::write_gpio_ctrl`]
+//! should be called afterwards.
+//!
+//! ```
+//! # use ltc2949::client::{Client, CurGpioControlRegister, GpioCtrl, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let gpio5_config = CurGpioControlRegister::new().with_gpio5_ctrl(GpioCtrl::Toggle400kHz);
+//!
+//! client.write_gpio5_config(gpio5_config).unwrap();
 //! ```
 //!
 //! ## Overcurrent configuration
@@ -260,6 +273,57 @@
 //! let hardware_self_test_passed = !faults.hwbist();
 //! assert!(configuration_is_valid);
 //! assert!(hardware_self_test_passed);
+//! ```
+//!
+//! ## Threshold monitoring
+//!
+//! The alert readers decode the PAGE0 threshold and overflow status registers into named
+//! flags. [`Client::read_vt_alerts`] covers battery voltage, temperature, and the two slow
+//! AUX slots; [`Client::read_ip_alerts`] covers current and power; and
+//! [`Client::read_c_alerts`] covers accumulated charge. [`Client::read_ceof_alerts`],
+//! [`Client::read_tb_alerts`], and [`Client::read_vcc_alerts`] report accumulator overflow,
+//! time-base, supply, and overcurrent-comparator alerts.
+//!
+//! Alert bits are sticky read/write flags. Follow the datasheet's memory-lock procedure
+//! before clearing alert registers so that an alert arriving during the clear is not lost.
+//!
+//! ```
+//! # use ltc2949::client::{Client, LTC2949};
+//! # use ltc2949::example::ExampleSPIDevice;
+//!
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let vt_alerts = client.read_vt_alerts().unwrap();
+//!
+//! // The example device reports a nominal status with no thresholds exceeded.
+//! assert!(!vt_alerts.bath());
+//! assert!(!vt_alerts.temph());
+//! assert!(!vt_alerts.slot1h());
+//! ```
+//!
+//! PAGE1 threshold setters accept physical SI values and round to the nearest register code
+//! using the scales in datasheet Tables 26–28. Current, power, charge, and energy setters
+//! also take the shunt resistance so callers can use amperes, watts, coulombs, and joules
+//! instead of the IC's intermediate V/V² units. Values that do not fit return
+//! [`Error::InvalidThreshold`].
+//!
+//! ```
+//! # use ltc2949::client::{AccumulatorClock, ChargeAccumulator, Channel, Client, LTC2949, ThresholdPair};
+//! # use ltc2949::example::ExampleSPIDevice;
+//! let mut client = LTC2949::new(ExampleSPIDevice::default());
+//! let shunt_ohms = 100e-6;
+//!
+//! client
+//!     .write_current_thresholds(Channel::One, ThresholdPair::new(-100.0, 100.0), shunt_ohms)
+//!     .unwrap();
+//! client.write_battery_thresholds(ThresholdPair::new(0.0, 10.0)).unwrap();
+//! client
+//!     .write_charge_thresholds(
+//!         ChargeAccumulator::Charge1,
+//!         ThresholdPair::new(-100.0, 100.0),
+//!         shunt_ohms as f64,
+//!         AccumulatorClock::Internal,
+//!     )
+//!     .unwrap();
 //! ```
 //!
 //! ## Current measurements
@@ -433,9 +497,6 @@ pub const T_READY_US: u32 = 20;
 /// STANDBY). Returned by [`Client::request_memory_lock`].
 pub const T_MLCK_US: u32 = 130_000;
 
-/// Fixed PECC field (datasheet Table 12): 16 data bytes per PEC group.
-const PECC: u8 = 15;
-
 /// Encoded ID byte carried by direct-command read and write frames (datasheet Table 12).
 pub(crate) struct DcmdId {
     /// `true` for a read command (`RW = 1`, `!RW = 0`), `false` for a write command.
@@ -469,9 +530,7 @@ impl From<DcmdId> for u8 {
         let p0 = id.pecc & 1;
         let rw = u8::from(id.read);
         let not_rw = rw ^ 1;
-        let bit5 = p3 ^ p2;
-        let bit2 = p1 ^ p0;
-        (rw << 7) | (not_rw << 6) | (bit5 << 5) | (p3 << 4) | (p2 << 3) | (bit2 << 2) | (p1 << 1) | p0
+        (rw << 7) | (not_rw << 6) | ((p3 ^ p2) << 5) | (p3 << 4) | (p2 << 3) | ((p1 ^ p0) << 2) | (p1 << 1) | p0
     }
 }
 
@@ -507,6 +566,13 @@ pub enum RegAddressP0 {
     Time4 = 0x3C,
     WkupAck = 0x70,
     Status = 0x80,
+    StatVT = 0x81,
+    StatIP = 0x82,
+    StatC = 0x83,
+    StatE = 0x84,
+    StatCEOF = 0x85,
+    StatTB = 0x86,
+    StatVCC = 0x87,
     Current1 = 0x90, // 24-bit signed
     Power1 = 0x93,
     Current2 = 0x96,
@@ -519,6 +585,7 @@ pub enum RegAddressP0 {
     Slot2 = 0xA8,
     Vref = 0xAA,
     Current2Avg = 0xAC,
+    Gpio4HbCtrl = 0xE8,
     // Slow-mode auxiliary-MUX slot selection (datasheet Tables 57 & 58). SLOT1/2 each
     // have separate MUXN / MUXP registers, adjacent so a 2-byte burst sets both.
     Slot1MuxN = 0xEB,
@@ -543,11 +610,47 @@ pub enum RegAddressP0 {
     RegsCtrl = 0xFF,
 }
 
-/// Page-1 register addresses: ADC config plus the NTC-linearisation and sense-resistor
-/// TC coefficient blocks (datasheet Tables 69, 71, 76). Discriminant = on-bus `RADDR` byte.
+/// Page-1 register addresses: thresholds, gain correction, ADC config, NTC-linearisation,
+/// and sense-resistor TC coefficient blocks (datasheet Tables 67, 69, 71, 72, 76).
+/// Discriminant = on-bus `RADDR` byte.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum RegAddressP1 {
+    // Threshold Registers
+    C1Th = 0x00,
+    C1Tl = 0x06,
+    Tb1Th = 0x0C,
+    E1Th = 0x10,
+    E1Tl = 0x16,
+    C2Th = 0x20,
+    C2Tl = 0x26,
+    Tb2Th = 0x2C,
+    E2Th = 0x30,
+    E2Tl = 0x36,
+    C3Th = 0x44,
+    Tb3Th = 0x4C,
+    C3Tl = 0x54,
+    E4Th = 0x64,
+    Tb4Th = 0x6C,
+    E4Tl = 0x74,
+    I1Th = 0x80,
+    I1Tl = 0x82,
+    P1Th = 0x84,
+    P1Tl = 0x86,
+    I2Th = 0x88,
+    I2Tl = 0x8A,
+    P2Th = 0x8C,
+    P2Tl = 0x8E,
+    BatTh = 0x90,
+    BatTl = 0x92,
+    TempTh = 0x94,
+    TempTl = 0x96,
+    VccTh = 0x98,
+    VccTl = 0x9A,
+    Slot1Th = 0xA0,
+    Slot1Tl = 0xA2,
+    Slot2Th = 0xA4,
+    Slot2Tl = 0xA6,
     // 2nd-order sense-resistor TC (3 bytes Float24 each), tucked low on the page.
     Rs1Tc2 = 0x5C,
     Rs2Tc2 = 0x7C,
@@ -569,6 +672,23 @@ pub enum RegAddressP1 {
     Ntc2C = 0xE6,
     Rs2Tc = 0xE9,
     Rs2T0 = 0xEC,
+    // Gain configuration — Float24 factors and their MUX input assignments (Table 72).
+    Rs1Gc = 0xB0,
+    Rs2Gc = 0xB3,
+    RsRatio = 0xB6,
+    BatGc = 0xB9,
+    Mux1Gc = 0xC0,
+    Mux2Gc = 0xC3,
+    Mux3Gc = 0xC6,
+    Mux4Gc = 0xC9,
+    MuxNset1 = 0xBC,
+    MuxPset1 = 0xBD,
+    MuxNset2 = 0xBE,
+    MuxPset2 = 0xBF,
+    MuxNset3 = 0xCC,
+    MuxPset3 = 0xCD,
+    MuxNset4 = 0xCE,
+    MuxPset4 = 0xCF,
 }
 
 /// Raw I1/I2 slow-mode current-sense voltage result.
@@ -584,6 +704,11 @@ pub struct CurrentSenseVoltage {
 impl CurrentSenseVoltage {
     /// Voltage represented by one raw ADC code.
     pub const LSB_VOLTS: f32 = 950e-9;
+    /// Voltage represented by one I1TH/I1TL or I2TH/I2TL threshold code.
+    ///
+    /// The threshold registers contain the upper 16 bits of the effective 18-bit current
+    /// result, so their LSB is four times the result-register LSB (3.8 µV).
+    pub const THRESHOLD_LSB_VOLTS: f32 = 4.0 * Self::LSB_VOLTS;
 
     /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
     pub const fn from_raw(raw: i32) -> Self {
@@ -645,6 +770,10 @@ impl PowerOrVoltage {
     pub const POWER_LSB_VOLT_SQUARED: f32 = 5.8368e-12;
     /// Voltage-mode scale represented by one raw ADC code.
     pub const VOLTAGE_LSB_VOLTS: f32 = 46.875e-6;
+    /// Power-mode scale represented by one P1TH/P1TL or P2TH/P2TL threshold code.
+    pub const POWER_THRESHOLD_LSB_VOLT_SQUARED: f32 = 4.0 * Self::POWER_LSB_VOLT_SQUARED;
+    /// Voltage-mode scale represented by one P1TH/P1TL or P2TH/P2TL threshold code.
+    pub const VOLTAGE_THRESHOLD_LSB_VOLTS: f32 = 4.0 * Self::VOLTAGE_LSB_VOLTS;
 
     /// Wraps a raw signed 24-bit ADC code, sign-extended to `i32`.
     pub const fn from_raw(raw: i32) -> Self {
@@ -875,6 +1004,358 @@ pub struct AccumulatedTime {
     raw: u32,
 }
 
+/// Charge accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ChargeAccumulator {
+    Charge1,
+    Charge2,
+    /// Weighted sum of channels 1 and 2; its SI conversion uses the channel-1 shunt.
+    Charge3,
+}
+
+/// Energy accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum EnergyAccumulator {
+    Energy1,
+    Energy2,
+    /// Weighted sum of channels 1 and 2; its SI conversion uses the channel-1 shunt.
+    Energy4,
+}
+
+/// Time-base accumulator selected for a PAGE1 threshold write.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum TimeBase {
+    Time1,
+    Time2,
+    Time3,
+    Time4,
+}
+
+/// A single threshold expressed in the caller's physical unit.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Threshold<T> {
+    /// Threshold in the physical unit expected by the caller.
+    pub value: T,
+}
+
+impl<T> Threshold<T> {
+    /// Creates a single physical threshold.
+    pub const fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+/// Low and high thresholds expressed in the caller's physical unit.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct ThresholdPair<T> {
+    /// Low threshold in the physical unit expected by the caller.
+    pub low: T,
+    /// High threshold in the physical unit expected by the caller.
+    pub high: T,
+}
+
+impl<T> ThresholdPair<T> {
+    /// Creates an ordered low/high physical threshold pair.
+    ///
+    /// Ordering is validated when the pair is quantized or passed to a client method.
+    pub const fn new(low: T, high: T) -> Self {
+        Self { low, high }
+    }
+}
+
+impl ThresholdPair<f64> {
+    fn quantize_signed_code(value: f64, lsb: f64, minimum: f64, maximum: f64) -> Result<i64, ThresholdConversionError> {
+        if !value.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+
+        let scaled = value / lsb;
+        if scaled <= minimum - 0.5 || scaled >= maximum + 0.5 {
+            return Err(ThresholdConversionError::OutOfRange);
+        }
+
+        Ok(if scaled >= 0.0 {
+            (scaled + 0.5) as i64
+        } else {
+            (scaled - 0.5) as i64
+        })
+    }
+}
+
+/// Reason a physical threshold could not be converted to its register representation.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ThresholdConversionError {
+    /// A threshold value was NaN or infinite.
+    NonFiniteValue,
+    /// The LSB was zero, negative, NaN, or infinite.
+    InvalidScale,
+    /// The low threshold was greater than the high threshold.
+    LowAboveHigh,
+    /// The rounded value does not fit in the target register format.
+    OutOfRange,
+}
+
+/// Converts a threshold in physical units into a scaled LTC2949 register value.
+///
+/// `lsb` is the amount of the physical unit represented by one register code. Conversion
+/// rounds to the nearest code, with half-way values rounded away from zero.
+pub trait Quantize<Output> {
+    /// Quantizes this value using the supplied physical-unit LSB.
+    fn quantize(self, lsb: f64) -> Result<Output, ThresholdConversionError>;
+}
+
+/// Encoded signed 16-bit high/low threshold pair used by the non-accumulated measurements.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed16Thresholds {
+    high: i16,
+    low: i16,
+}
+
+impl Signed16Thresholds {
+    /// Returns the quantized high threshold.
+    pub const fn high(self) -> i16 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold.
+    pub const fn low(self) -> i16 {
+        self.low
+    }
+
+    /// Encodes the high value followed by the low value, most-significant byte first.
+    pub fn to_be_bytes(self) -> [u8; 4] {
+        let mut bytes = [0u8; 4];
+        bytes[..2].copy_from_slice(&self.high.to_be_bytes());
+        bytes[2..].copy_from_slice(&self.low.to_be_bytes());
+        bytes
+    }
+}
+
+/// Encoded signed 48-bit high/low accumulator threshold pair.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed48Thresholds {
+    high: i64,
+    low: i64,
+}
+
+impl Signed48Thresholds {
+    /// Returns the quantized high threshold as a sign-extended `i64`.
+    pub const fn high(self) -> i64 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold as a sign-extended `i64`.
+    pub const fn low(self) -> i64 {
+        self.low
+    }
+
+    /// Encodes the high value followed by the low value as two big-endian 48-bit values.
+    pub fn to_be_bytes(self) -> [u8; 12] {
+        let high = self.high.to_be_bytes();
+        let low = self.low.to_be_bytes();
+        let mut bytes = [0u8; 12];
+        bytes[..6].copy_from_slice(&high[2..]);
+        bytes[6..].copy_from_slice(&low[2..]);
+        bytes
+    }
+}
+
+/// Encoded signed 64-bit high/low accumulator threshold pair.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Signed64Thresholds {
+    high: i64,
+    low: i64,
+}
+
+impl Signed64Thresholds {
+    /// Returns the quantized high threshold.
+    pub const fn high(self) -> i64 {
+        self.high
+    }
+
+    /// Returns the quantized low threshold.
+    pub const fn low(self) -> i64 {
+        self.low
+    }
+
+    /// Encodes the high threshold, most-significant byte first.
+    pub const fn high_to_be_bytes(self) -> [u8; 8] {
+        self.high.to_be_bytes()
+    }
+
+    /// Encodes the low threshold, most-significant byte first.
+    pub const fn low_to_be_bytes(self) -> [u8; 8] {
+        self.low.to_be_bytes()
+    }
+}
+
+/// Encoded unsigned 32-bit time-base threshold.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Unsigned32Threshold {
+    raw: u32,
+}
+
+impl Unsigned32Threshold {
+    /// Returns the quantized register code.
+    pub const fn raw(self) -> u32 {
+        self.raw
+    }
+
+    /// Encodes the threshold, most-significant byte first.
+    pub const fn to_be_bytes(self) -> [u8; 4] {
+        self.raw.to_be_bytes()
+    }
+}
+
+impl Quantize<Signed16Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed16Thresholds, ThresholdConversionError> {
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        Ok(Signed16Thresholds {
+            high: Self::quantize_signed_code(self.high, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+            low: Self::quantize_signed_code(self.low, lsb, f64::from(i16::MIN), f64::from(i16::MAX))? as i16,
+        })
+    }
+}
+
+impl Quantize<Signed16Thresholds> for ThresholdPair<f32> {
+    fn quantize(self, lsb: f64) -> Result<Signed16Thresholds, ThresholdConversionError> {
+        ThresholdPair::new(f64::from(self.low), f64::from(self.high)).quantize(lsb)
+    }
+}
+
+impl Quantize<Signed48Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed48Thresholds, ThresholdConversionError> {
+        const MIN: f64 = -((1u64 << 47) as f64);
+        const MAX: f64 = ((1u64 << 47) - 1) as f64;
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        Ok(Signed48Thresholds {
+            high: Self::quantize_signed_code(self.high, lsb, MIN, MAX)?,
+            low: Self::quantize_signed_code(self.low, lsb, MIN, MAX)?,
+        })
+    }
+}
+
+impl Quantize<Signed64Thresholds> for ThresholdPair<f64> {
+    fn quantize(self, lsb: f64) -> Result<Signed64Thresholds, ThresholdConversionError> {
+        if self.low > self.high {
+            return Err(ThresholdConversionError::LowAboveHigh);
+        }
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+        if !self.low.is_finite() || !self.high.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+
+        fn quantize(value: f64, lsb: f64) -> Result<i64, ThresholdConversionError> {
+            // `i64::MAX as f64` rounds up to 2^63, so use an exclusive upper bound.
+            let scaled = value / lsb;
+            if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&scaled) {
+                return Err(ThresholdConversionError::OutOfRange);
+            }
+            Ok(if scaled >= 0.0 {
+                (scaled + 0.5) as i64
+            } else {
+                (scaled - 0.5) as i64
+            })
+        }
+
+        Ok(Signed64Thresholds {
+            high: quantize(self.high, lsb)?,
+            low: quantize(self.low, lsb)?,
+        })
+    }
+}
+
+impl Quantize<Unsigned32Threshold> for Threshold<f64> {
+    fn quantize(self, lsb: f64) -> Result<Unsigned32Threshold, ThresholdConversionError> {
+        if !self.value.is_finite() {
+            return Err(ThresholdConversionError::NonFiniteValue);
+        }
+        if !lsb.is_finite() || lsb <= 0.0 {
+            return Err(ThresholdConversionError::InvalidScale);
+        }
+        let scaled = self.value / lsb;
+        if self.value < 0.0 || scaled >= f64::from(u32::MAX) + 0.5 {
+            return Err(ThresholdConversionError::OutOfRange);
+        }
+        Ok(Unsigned32Threshold {
+            raw: (scaled + 0.5) as u32,
+        })
+    }
+}
+
+/// Output mode encoded by each two-bit `GPIOxCTRL` field (datasheet Tables 62 and 63).
+#[derive(Specifier, Copy, Clone, Eq, PartialEq, Debug)]
+#[bits = 2]
+pub enum GpioCtrl {
+    /// High-impedance input.
+    Tristate = 0b00,
+    /// Drive low (DGND).
+    Low = 0b01,
+    /// Toggle at 400 kHz.
+    Toggle400kHz = 0b10,
+    /// Drive high (DVCC).
+    High = 0b11,
+}
+
+/// Clock configuration used to scale accumulated charge, energy, and time thresholds.
+///
+/// [`Internal`](Self::Internal) also covers a 4 MHz crystal with the datasheet's `PRE = 2`,
+/// `DIV = 30` settings (Table 26). The external-clock formula follows Table 27.
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
+pub enum AccumulatorClock {
+    #[default]
+    Internal,
+    External {
+        /// External clock frequency in hertz.
+        frequency_hz: f64,
+        /// PRE field value (0–7).
+        pre: u8,
+        /// DIV field value (0–31).
+        div: u8,
+    },
+}
+
+/// Errors returned when an [`AccumulatorClock`] cannot be converted into accumulator LSBs.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum AccumulatorClockError {
+    /// The clock configuration is invalid for the datasheet formula.
+    InvalidConfiguration,
+}
+
+impl AccumulatorClock {
+    /// Returns the charge, energy, and time LSBs for this clock configuration.
+    pub fn lsbs(self) -> Result<(f64, f64, f64), AccumulatorClockError> {
+        match self {
+            AccumulatorClock::Internal => Ok((
+                AccumulatedCharge::LSB_VOLT_SECONDS,
+                AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS,
+                AccumulatedTime::LSB_SECONDS,
+            )),
+            AccumulatorClock::External { frequency_hz, pre, div } => {
+                if !frequency_hz.is_finite() || frequency_hz <= 0.0 || pre > 7 || div > 31 {
+                    return Err(AccumulatorClockError::InvalidConfiguration);
+                }
+                let clock_factor = f64::from(1u16 << pre) * (f64::from(div) + 1.0) / frequency_hz;
+                Ok((
+                    1.21899e-5 * clock_factor,
+                    7.4895e-5 * clock_factor,
+                    12.8315 * clock_factor,
+                ))
+            }
+        }
+    }
+}
+
 impl AccumulatedTime {
     /// Seconds represented by one raw code with the internal clock or a 4 MHz crystal.
     pub const LSB_SECONDS: f64 = 397.777e-6;
@@ -917,6 +1398,60 @@ impl Register for RegAddressP1 {
     fn addr(self) -> u8 {
         self as u8
     }
+}
+
+/// GPIO4 heartbeat control register (`GPIO4HBCTRL`, PAGE0 0xE8; datasheet Table 61).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct Gpio4HeartbeatControlRegister {
+    /// Enable the GPIO4 heartbeat output.
+    pub gpio4_hb_enable: bool,
+    // Reserved bits 7:1. Write as zero.
+    #[skip]
+    __: B7,
+}
+
+/// Current-source and GPIO5 control register (`FCURGPIOCTRL`, PAGE0 0xF1;
+/// datasheet Table 62).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CurGpioControlRegister {
+    /// GPIO5 output mode.
+    #[bits = 2]
+    pub gpio5_ctrl: GpioCtrl,
+    // Reserved bits 3:2. Write as zero.
+    #[skip]
+    __: B2,
+    /// MUXP current-source polarity.
+    pub mux_p_cur_pol: bool,
+    /// Enable the MUXP current source.
+    pub mux_p_cur_en: bool,
+    /// MUXN current-source polarity.
+    pub mux_n_cur_pol: bool,
+    /// Enable the MUXN current source.
+    pub mux_n_cur_en: bool,
+}
+
+/// GPIO1 through GPIO4 control register (`FGPIOCTRL`, PAGE0 0xF2;
+/// datasheet Table 63).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct GpioControlRegister {
+    /// GPIO1 output mode (bits 1:0).
+    #[bits = 2]
+    pub gpio1_ctrl: GpioCtrl,
+    /// GPIO2 output mode (bits 3:2).
+    #[bits = 2]
+    pub gpio2_ctrl: GpioCtrl,
+    /// GPIO3 output mode (bits 5:4).
+    #[bits = 2]
+    pub gpio3_ctrl: GpioCtrl,
+    /// GPIO4 output mode (bits 7:6).
+    #[bits = 2]
+    pub gpio4_ctrl: GpioCtrl,
 }
 
 /// Operation Control register (PAGE0, 0xF0) — datasheet Table 24. `clr`, `sshot`, `adjupd`
@@ -1041,6 +1576,24 @@ impl Default for OpsControlRegister {
     }
 }
 
+impl Default for Gpio4HeartbeatControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for CurGpioControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for GpioControlRegister {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for FastControlRegister {
     fn default() -> Self {
         Self::new()
@@ -1081,6 +1634,162 @@ pub struct StatusRegister {
     // Reserved bit 7.
     #[skip]
     __: B1,
+}
+
+/// Voltage, Temperature Threshold Alerts register (PAGE0, 0x81; datasheet Table 35).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct VTAlerts {
+    /// BATH: voltage (VBATP – VBATM) high threshold exceeded.
+    pub bath: bool,
+    /// BATL: voltage (VBATP – VBATM) low threshold exceeded.
+    pub batl: bool,
+    /// TEMPH: temperature high threshold exceeded.
+    pub temph: bool,
+    /// TEMPL: temperature low threshold exceeded.
+    pub templ: bool,
+    /// SLOT1H: SLOT1 high threshold exceeded.
+    pub slot1h: bool,
+    /// SLOT1L: SLOT1 low threshold exceeded.
+    pub slot1l: bool,
+    /// SLOT2H: SLOT2 high threshold exceeded.
+    pub slot2h: bool,
+    /// SLOT2L: SLOT2 low threshold exceeded.
+    pub slot2l: bool,
+}
+
+/// Current and power threshold alerts (STATIP, PAGE0, 0x82; datasheet Table 36).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct IPAlerts {
+    /// I1H: Current1 high threshold exceeded.
+    pub i1h: bool,
+    /// I1L: Current1 low threshold exceeded.
+    pub i1l: bool,
+    /// P1H: Power1 high threshold exceeded.
+    pub p1h: bool,
+    /// P1L: Power1 low threshold exceeded.
+    pub p1l: bool,
+    /// I2H: Current2 high threshold exceeded.
+    pub i2h: bool,
+    /// I2L: Current2 low threshold exceeded.
+    pub i2l: bool,
+    /// P2H: Power2 high threshold exceeded.
+    pub p2h: bool,
+    /// P2L: Power2 low threshold exceeded.
+    pub p2l: bool,
+}
+
+/// Charge threshold alerts (STATC, PAGE0, 0x83; datasheet Table 37).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CAlerts {
+    /// C1H: Charge1 high threshold exceeded.
+    pub c1h: bool,
+    /// C1L: Charge1 low threshold exceeded.
+    pub c1l: bool,
+    /// C2H: Charge2 high threshold exceeded.
+    pub c2h: bool,
+    /// C2L: Charge2 low threshold exceeded.
+    pub c2l: bool,
+    /// C3H: Charge3 high threshold exceeded.
+    pub c3h: bool,
+    /// C3L: Charge3 low threshold exceeded.
+    pub c3l: bool,
+    // Reserved bits 6–7.
+    #[skip]
+    __: B2,
+}
+
+/// Energy threshold alerts (STATE, PAGE0, 0x84; datasheet Table 38).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct EAlerts {
+    /// E1H: Energy1 high threshold exceeded.
+    pub e1h: bool,
+    /// E1L: Energy1 low threshold exceeded.
+    pub e1l: bool,
+    /// E2H: Energy2 high threshold exceeded.
+    pub e2h: bool,
+    /// E2L: Energy2 low threshold exceeded.
+    pub e2l: bool,
+    // Reserved bits 4–5.
+    #[skip]
+    __: B2,
+    /// E4H: Energy4 high threshold exceeded.
+    pub e4h: bool,
+    /// E4L: Energy4 low threshold exceeded.
+    pub e4l: bool,
+}
+
+/// Charge and energy overflow alerts (STATCEOF, PAGE0, 0x85; datasheet Table 39).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct CEOFAlerts {
+    /// C1OVF: Charge1 accumulator overflowed.
+    pub c1ovf: bool,
+    /// C2OVF: Charge2 accumulator overflowed.
+    pub c2ovf: bool,
+    /// C3OVF: Charge3 accumulator overflowed.
+    pub c3ovf: bool,
+    // Reserved bit 3.
+    #[skip]
+    __: B1,
+    /// E1OVF: Energy1 accumulator overflowed.
+    pub e1ovf: bool,
+    /// E2OVF: Energy2 accumulator overflowed.
+    pub e2ovf: bool,
+    // Reserved bit 6.
+    #[skip]
+    __: B1,
+    /// E4OVF: Energy4 accumulator overflowed.
+    pub e4ovf: bool,
+}
+
+/// Time-base threshold and overflow alerts (STATTB, PAGE0, 0x86; datasheet Table 40).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct TBAlerts {
+    /// T1TH: Time1 threshold exceeded.
+    pub t1th: bool,
+    /// T2TH: Time2 threshold exceeded.
+    pub t2th: bool,
+    /// T3TH: Time3 threshold exceeded.
+    pub t3th: bool,
+    /// T4TH: Time4 threshold exceeded.
+    pub t4th: bool,
+    /// T1OVF: Time1 overflowed.
+    pub t1ovf: bool,
+    /// T2OVF: Time2 overflowed.
+    pub t2ovf: bool,
+    /// T3OVF: Time3 overflowed.
+    pub t3ovf: bool,
+    /// T4OVF: Time4 overflowed.
+    pub t4ovf: bool,
+}
+
+/// VCC and overcurrent-comparator alerts (STATVCC, PAGE0, 0x87; datasheet Table 41).
+#[bitfield(bits = 8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(u8)]
+pub struct VCCAlerts {
+    /// VCCH: VCC high threshold exceeded.
+    pub vcch: bool,
+    /// VCCL: VCC low threshold exceeded.
+    pub vccl: bool,
+    /// OCC1H: Current1 remained above the OCC1 threshold for longer than its deglitch time.
+    pub occ1h: bool,
+    /// OCC2H: Current2 remained above the OCC2 threshold for longer than its deglitch time.
+    pub occ2h: bool,
+    // Reserved bits 4–7.
+    #[skip]
+    __: B4,
 }
 
 /// Fault register (PAGE0, 0xDD; datasheet Table 28).
@@ -1263,12 +1972,112 @@ pub enum MuxInput {
     Vref2Via250k = 23,
 }
 
+/// One of the four programmable AUX-MUX gain-correction settings in Table 72.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum MuxGainSlot {
+    One,
+    Two,
+    Three,
+    Four,
+}
+
+/// Gain correction applied to one current-sense channel (`RS1GC` or `RS2GC`).
+///
+/// Construct it either from an already calculated dimensionless correction factor or from
+/// the shunt's nominal and measured resistance. In the latter case the programmed factor is
+/// `nominal_ohms / actual_ohms`, as specified below datasheet Table 72.
+///
+/// Input validation happens in [`Client::write_shunt_gain_correction`], allowing both
+/// constructors to remain infallible and convenient in configuration structures.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum ShuntGainCorrection {
+    /// An already calculated, dimensionless correction factor.
+    CorrectionFactor(f32),
+    /// The nominal and measured shunt resistances used to calculate the correction factor.
+    Resistances { nominal_ohms: f32, actual_ohms: f32 },
+}
+
+impl ShuntGainCorrection {
+    /// Uses an already calculated, dimensionless correction factor.
+    pub const fn from_correction_factor(correction_factor: f32) -> Self {
+        Self::CorrectionFactor(correction_factor)
+    }
+
+    /// Calculates the correction factor from the nominal and measured shunt resistances.
+    pub const fn from_resistances(nominal_ohms: f32, actual_ohms: f32) -> Self {
+        Self::Resistances {
+            nominal_ohms,
+            actual_ohms,
+        }
+    }
+
+    /// Returns the dimensionless factor that will be written to the gain-correction register.
+    ///
+    /// This is the supplied factor or `nominal_ohms / actual_ohms`. The write method rejects
+    /// non-positive or non-finite inputs before accessing the bus.
+    pub fn correction_factor(self) -> f32 {
+        match self {
+            Self::CorrectionFactor(correction_factor) => correction_factor,
+            Self::Resistances {
+                nominal_ohms,
+                actual_ohms,
+            } => nominal_ohms / actual_ohms,
+        }
+    }
+}
+
+/// A strictly positive, finite ratio.
+///
+/// This wraps the `numerator / denominator` check used for shunt calibration and shunt-ratio
+/// writes so callers can validate it once and reuse the resulting value.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct PositiveRatio(f32);
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PositiveRatioError {
+    NonPositiveOrNonFinite,
+}
+
+impl PositiveRatio {
+    /// Constructs a ratio from an already calculated dimensionless value.
+    pub fn try_from_ratio(ratio: f32) -> Result<Self, PositiveRatioError> {
+        if !ratio.is_finite() || ratio <= 0.0 {
+            return Err(PositiveRatioError::NonPositiveOrNonFinite);
+        }
+        Ok(Self(ratio))
+    }
+
+    /// Constructs a ratio from `numerator / denominator`.
+    pub fn try_from_parts(numerator: f32, denominator: f32) -> Result<Self, PositiveRatioError> {
+        if !numerator.is_finite() || numerator <= 0.0 || !denominator.is_finite() || denominator <= 0.0 {
+            return Err(PositiveRatioError::NonPositiveOrNonFinite);
+        }
+        Self::try_from_ratio(numerator / denominator)
+    }
+
+    /// Returns the stored ratio.
+    pub const fn value(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<PositiveRatio> for f32 {
+    fn from(ratio: PositiveRatio) -> Self {
+        ratio.value()
+    }
+}
+
 /// Errors that can occur talking to an LTC2949.
 pub enum Error<B: SpiDevice<u8>> {
     /// Underlying SPI transaction failed.
     BusError(B::Error),
     /// A returned PEC did not match the calculated value.
     ChecksumMismatch,
+    /// A threshold was non-finite, used an invalid clock/shunt configuration, had its low
+    /// bound above its high bound, or did not fit in the corresponding Table 67 register.
+    InvalidThreshold,
+    /// A gain factor or resistance used to derive one was zero, negative, NaN, or infinite.
+    InvalidGainCorrection,
 }
 
 impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
@@ -1276,7 +2085,15 @@ impl<B: SpiDevice<u8>> core::fmt::Debug for Error<B> {
         match self {
             Error::BusError(_) => f.debug_struct("BusError").finish(),
             Error::ChecksumMismatch => f.debug_struct("ChecksumMismatch").finish(),
+            Error::InvalidThreshold => f.debug_struct("InvalidThreshold").finish(),
+            Error::InvalidGainCorrection => f.debug_struct("InvalidGainCorrection").finish(),
         }
+    }
+}
+
+impl<B: SpiDevice<u8>> From<ThresholdConversionError> for Error<B> {
+    fn from(_: ThresholdConversionError) -> Self {
+        Self::InvalidThreshold
     }
 }
 
@@ -1311,6 +2128,114 @@ pub trait Client {
     /// ADJUPD pulse on OPCTRL while the core is in STANDBY.
     fn write_adcconf(&mut self, value: AdcConfiguration) -> Result<(), Self::Error>;
 
+    /// Writes the Float24 gain correction for sense resistor 1 or 2 (`RS1GC` or `RS2GC`,
+    /// Table 72). Construct `correction` from either a dimensionless factor or the nominal
+    /// and actual shunt resistances. Apply the change with an `ADJUPD` pulse while the device
+    /// is in STANDBY.
+    fn write_shunt_gain_correction(
+        &mut self,
+        channel: Channel,
+        correction: ShuntGainCorrection,
+    ) -> Result<(), Self::Error>;
+
+    /// Calculates and writes `RSRATIO = RS1 / RS2` as Float24. This factor is used when
+    /// channel 2 contributes to the combined C3 and E4 accumulators.
+    fn write_shunt_ratio(&mut self, rs1_ohms: f32, rs2_ohms: f32) -> Result<(), Self::Error>;
+
+    /// Writes the dimensionless battery-divider gain-correction factor (`BATGC`) as Float24.
+    fn write_battery_gain_correction(&mut self, correction_factor: f32) -> Result<(), Self::Error>;
+
+    /// Configures one of the four AUX-MUX gain corrections. Writes its Float24 `MUXnGC`
+    /// factor and the matching `MUXNSETn`/`MUXPSETn` input codes from Table 57.
+    /// Matching is polarity-independent in the LTC2949.
+    fn write_mux_gain_correction(
+        &mut self,
+        slot: MuxGainSlot,
+        correction_factor: f32,
+        negative: MuxInput,
+        positive: MuxInput,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes the low and high threshold for C1, C2, or C3 (Table 67), converting coulombs
+    /// with `shunt_ohms` and the selected accumulator clock. C3 uses the channel-1 shunt.
+    fn write_charge_thresholds(
+        &mut self,
+        accumulator: ChargeAccumulator,
+        thresholds: ThresholdPair<f64>,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes the low and high threshold for E1, E2, or E4 (Table 67), converting joules
+    /// with `shunt_ohms` and the selected accumulator clock. E4 uses the channel-1 shunt.
+    fn write_energy_thresholds(
+        &mut self,
+        accumulator: EnergyAccumulator,
+        thresholds: ThresholdPair<f64>,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a TB1–TB4 high threshold in seconds (Table 67).
+    fn write_time_threshold(
+        &mut self,
+        time_base: TimeBase,
+        threshold: Threshold<f64>,
+        clock: AccumulatorClock,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes an I1/I2 low/high threshold pair in amperes. `shunt_ohms` converts the
+    /// requested current to differential shunt voltage. The 16-bit threshold LSB is 3.8 µV
+    /// (four times the 18-bit I1/I2 result LSB).
+    fn write_current_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+        shunt_ohms: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a power-mode P1/P2 low/high threshold pair in watts. Use this when the
+    /// corresponding `PxASV` bit is clear. The 16-bit threshold LSB is four times the
+    /// P1/P2 result-register LSB.
+    fn write_power_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+        shunt_ohms: f32,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a voltage-mode P1/P2 low/high threshold pair in volts. Use this when the
+    /// corresponding `PxASV` bit is set. The 16-bit threshold LSB is 187.5 µV.
+    fn write_power_as_voltage_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes the BAT low/high threshold pair in volts.
+    fn write_battery_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
+
+    /// Writes the die-temperature low/high threshold pair in degrees Celsius.
+    fn write_temperature_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
+
+    /// Writes the A/DVCC low/high threshold pair in volts.
+    fn write_vcc_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Self::Error>;
+
+    /// Writes a SLOT1/SLOT2 low/high threshold pair in volts (corresponding `NTCx` clear).
+    fn write_slot_voltage_thresholds(
+        &mut self,
+        slot: Channel,
+        thresholds: ThresholdPair<f32>,
+    ) -> Result<(), Self::Error>;
+
+    /// Writes a SLOT1/SLOT2 low/high threshold pair in degrees Celsius
+    /// (corresponding `NTCx` set).
+    fn write_slot_temperature_thresholds(
+        &mut self,
+        slot: Channel,
+        thresholds: ThresholdPair<f32>,
+    ) -> Result<(), Self::Error>;
+
     /// Writes the Fast AUX mux selection (FAMUXP, FAMUXN).
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Self::Error>;
 
@@ -1326,8 +2251,30 @@ pub trait Client {
     /// reads (datasheet Tables 57 & 58). NTCs typically use `(Vx, Agnd)`.
     fn write_slot_mux(&mut self, slot: Channel, negative: MuxInput, positive: MuxInput) -> Result<(), Self::Error>;
 
-    /// Writes GPIO Control
-    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error>;
+    /// Writes GPIO1 through GPIO4 control (`FGPIOCTRL`, datasheet Table 63).
+    ///
+    /// This write also transfers the previously written `FCURGPIOCTRL` value into the
+    /// device's active configuration. Keep at least 1 ms between writes to `FGPIOCTRL`.
+    fn write_gpio_ctrl(&mut self, gpio: GpioControlRegister) -> Result<(), Self::Error>;
+
+    /// Writes GPIO5 and MUX current-source control (`FCURGPIOCTRL`, datasheet Table 62).
+    ///
+    /// The value does not become active until `FGPIOCTRL` is subsequently written. Prefer
+    /// [`write_gpio_controls`](Self::write_gpio_controls) when configuring both registers.
+    fn write_gpio5_config(&mut self, config: CurGpioControlRegister) -> Result<(), Self::Error>;
+
+    /// Writes `FCURGPIOCTRL` and `FGPIOCTRL` in one burst, as recommended by the datasheet.
+    ///
+    /// Writing the second byte makes both configurations active. Keep at least 1 ms between
+    /// calls that write `FGPIOCTRL`.
+    fn write_gpio_controls(
+        &mut self,
+        gpio5_and_current: CurGpioControlRegister,
+        gpio1_to_4: GpioControlRegister,
+    ) -> Result<(), Self::Error>;
+
+    /// Enables or disables the GPIO4 heartbeat (`GPIO4HBCTRL`, datasheet Table 61).
+    fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error>;
 
     /// Writes both overcurrent-comparator control registers (`OCC1CTRL`/`OCC2CTRL`) in
     /// one PAGE0 burst. `config1` applies to channel 1; `config2` applies to channel 2.
@@ -1335,6 +2282,31 @@ pub trait Client {
 
     /// Reads and decodes the STATUS register (PAGE0, 0x80; datasheet Table 26).
     fn read_status(&mut self) -> Result<StatusRegister, Self::Error>;
+
+    /// Reads voltage, temperature, and SLOT threshold alerts (STATVT, PAGE0, 0x81;
+    /// datasheet Table 35). Set bits indicate that the corresponding high or low threshold
+    /// was exceeded; the flags are sticky read/write bits.
+    fn read_vt_alerts(&mut self) -> Result<VTAlerts, Self::Error>;
+
+    /// Reads current and power threshold alerts (STATIP, PAGE0, 0x82; datasheet Table 36).
+    fn read_ip_alerts(&mut self) -> Result<IPAlerts, Self::Error>;
+
+    /// Reads accumulated-charge threshold alerts (STATC, PAGE0, 0x83; datasheet Table 37).
+    fn read_c_alerts(&mut self) -> Result<CAlerts, Self::Error>;
+
+    fn read_e_alerts(&mut self) -> Result<EAlerts, Self::Error>;
+
+    /// Reads charge and energy accumulator overflow alerts (STATCEOF, PAGE0, 0x85;
+    /// datasheet Table 39).
+    fn read_ceof_alerts(&mut self) -> Result<CEOFAlerts, Self::Error>;
+
+    /// Reads time-base threshold and overflow alerts (STATTB, PAGE0, 0x86;
+    /// datasheet Table 40).
+    fn read_tb_alerts(&mut self) -> Result<TBAlerts, Self::Error>;
+
+    /// Reads VCC threshold and overcurrent-comparator alerts (STATVCC, PAGE0, 0x87;
+    /// datasheet Table 41).
+    fn read_vcc_alerts(&mut self) -> Result<VCCAlerts, Self::Error>;
 
     /// Reads and decodes the FAULTS register (PAGE0, 0xDD; datasheet Table 28).
     fn read_faults(&mut self) -> Result<FaultsRegister, Self::Error>;
@@ -1521,6 +2493,217 @@ where
         self.write_bytes(RegAddressP1::AdcConf, &value.into_bytes())
     }
 
+    fn write_shunt_gain_correction(
+        &mut self,
+        channel: Channel,
+        correction: ShuntGainCorrection,
+    ) -> Result<(), Error<B>> {
+        let address = match channel {
+            Channel::One => RegAddressP1::Rs1Gc,
+            Channel::Two => RegAddressP1::Rs2Gc,
+        };
+
+        let correction_factor = match correction {
+            ShuntGainCorrection::CorrectionFactor(correction_factor) => correction_factor,
+            ShuntGainCorrection::Resistances {
+                nominal_ohms,
+                actual_ohms,
+            } => PositiveRatio::try_from_parts(nominal_ohms, actual_ohms)
+                .map_err(|_| Error::InvalidGainCorrection)?
+                .value(),
+        };
+
+        self.write_gain_factor(address, correction_factor)
+    }
+
+    fn write_shunt_ratio(&mut self, rs1_ohms: f32, rs2_ohms: f32) -> Result<(), Error<B>> {
+        let ratio = PositiveRatio::try_from_parts(rs1_ohms, rs2_ohms)
+            .map_err(|_| Error::InvalidGainCorrection)?
+            .value();
+        self.write_gain_factor(RegAddressP1::RsRatio, ratio)
+    }
+
+    fn write_battery_gain_correction(&mut self, correction_factor: f32) -> Result<(), Error<B>> {
+        self.write_gain_factor(RegAddressP1::BatGc, correction_factor)
+    }
+
+    fn write_mux_gain_correction(
+        &mut self,
+        slot: MuxGainSlot,
+        correction_factor: f32,
+        negative: MuxInput,
+        positive: MuxInput,
+    ) -> Result<(), Error<B>> {
+        let (gain_address, mux_set_address) = match slot {
+            MuxGainSlot::One => (RegAddressP1::Mux1Gc, RegAddressP1::MuxNset1),
+            MuxGainSlot::Two => (RegAddressP1::Mux2Gc, RegAddressP1::MuxNset2),
+            MuxGainSlot::Three => (RegAddressP1::Mux3Gc, RegAddressP1::MuxNset3),
+            MuxGainSlot::Four => (RegAddressP1::Mux4Gc, RegAddressP1::MuxNset4),
+        };
+        let encoded = Self::encode_gain_factor(correction_factor)?;
+        self.write_bytes(gain_address, &encoded)?;
+        self.write_bytes(mux_set_address, &[negative as u8, positive as u8])
+    }
+
+    fn write_charge_thresholds(
+        &mut self,
+        accumulator: ChargeAccumulator,
+        thresholds: ThresholdPair<f64>,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (charge_lsb, _, _) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
+        let lsb_coulombs = Self::divide_lsb_by_shunt(charge_lsb, shunt_ohms)?;
+        match accumulator {
+            ChargeAccumulator::Charge1 | ChargeAccumulator::Charge2 => {
+                let address = match accumulator {
+                    ChargeAccumulator::Charge1 => RegAddressP1::C1Th,
+                    ChargeAccumulator::Charge2 => RegAddressP1::C2Th,
+                    ChargeAccumulator::Charge3 => unreachable!(),
+                };
+                let encoded: Signed48Thresholds = thresholds.quantize(lsb_coulombs)?;
+                self.write_bytes(address, &encoded.to_be_bytes())
+            }
+            ChargeAccumulator::Charge3 => {
+                let encoded: Signed64Thresholds = thresholds.quantize(lsb_coulombs)?;
+                self.write_bytes(RegAddressP1::C3Th, &encoded.high_to_be_bytes())?;
+                self.write_bytes(RegAddressP1::C3Tl, &encoded.low_to_be_bytes())
+            }
+        }
+    }
+
+    fn write_energy_thresholds(
+        &mut self,
+        accumulator: EnergyAccumulator,
+        thresholds: ThresholdPair<f64>,
+        shunt_ohms: f64,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (_, energy_lsb, _) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
+        let lsb_joules = Self::divide_lsb_by_shunt(energy_lsb, shunt_ohms)?;
+        match accumulator {
+            EnergyAccumulator::Energy1 | EnergyAccumulator::Energy2 => {
+                let address = match accumulator {
+                    EnergyAccumulator::Energy1 => RegAddressP1::E1Th,
+                    EnergyAccumulator::Energy2 => RegAddressP1::E2Th,
+                    EnergyAccumulator::Energy4 => unreachable!(),
+                };
+                let encoded: Signed48Thresholds = thresholds.quantize(lsb_joules)?;
+                self.write_bytes(address, &encoded.to_be_bytes())
+            }
+            EnergyAccumulator::Energy4 => {
+                let encoded: Signed64Thresholds = thresholds.quantize(lsb_joules)?;
+                self.write_bytes(RegAddressP1::E4Th, &encoded.high_to_be_bytes())?;
+                self.write_bytes(RegAddressP1::E4Tl, &encoded.low_to_be_bytes())
+            }
+        }
+    }
+
+    fn write_time_threshold(
+        &mut self,
+        time_base: TimeBase,
+        threshold: Threshold<f64>,
+        clock: AccumulatorClock,
+    ) -> Result<(), Error<B>> {
+        let (_, _, time_lsb) = clock.lsbs().map_err(|_| Error::InvalidThreshold)?;
+        let encoded: Unsigned32Threshold = threshold.quantize(time_lsb)?;
+        let address = match time_base {
+            TimeBase::Time1 => RegAddressP1::Tb1Th,
+            TimeBase::Time2 => RegAddressP1::Tb2Th,
+            TimeBase::Time3 => RegAddressP1::Tb3Th,
+            TimeBase::Time4 => RegAddressP1::Tb4Th,
+        };
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
+    fn write_current_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+        shunt_ohms: f32,
+    ) -> Result<(), Error<B>> {
+        let lsb_amperes =
+            Self::divide_lsb_by_shunt(CurrentSenseVoltage::THRESHOLD_LSB_VOLTS as f64, shunt_ohms as f64)?;
+        let address = match channel {
+            Channel::One => RegAddressP1::I1Th,
+            Channel::Two => RegAddressP1::I2Th,
+        };
+        let encoded: Signed16Thresholds = thresholds.quantize(lsb_amperes)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
+    fn write_power_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+        shunt_ohms: f32,
+    ) -> Result<(), Error<B>> {
+        let lsb_watts = Self::divide_lsb_by_shunt(
+            PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED as f64,
+            shunt_ohms as f64,
+        )?;
+        let address = match channel {
+            Channel::One => RegAddressP1::P1Th,
+            Channel::Two => RegAddressP1::P2Th,
+        };
+        let encoded: Signed16Thresholds = thresholds.quantize(lsb_watts)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
+    fn write_power_as_voltage_thresholds(
+        &mut self,
+        channel: Channel,
+        thresholds: ThresholdPair<f32>,
+    ) -> Result<(), Error<B>> {
+        let address = match channel {
+            Channel::One => RegAddressP1::P1Th,
+            Channel::Two => RegAddressP1::P2Th,
+        };
+        let encoded: Signed16Thresholds = thresholds.quantize(PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
+    fn write_battery_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let encoded: Signed16Thresholds = thresholds.quantize(BatteryVoltage::LSB_VOLTS as f64)?;
+        self.write_bytes(RegAddressP1::BatTh, &encoded.to_be_bytes())
+    }
+
+    fn write_temperature_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let kelvin = ThresholdPair::new(
+            thresholds.low + DieTemperature::ZERO_CELSIUS_KELVIN,
+            thresholds.high + DieTemperature::ZERO_CELSIUS_KELVIN,
+        );
+        let encoded: Signed16Thresholds = kelvin.quantize(DieTemperature::LSB_KELVIN as f64)?;
+        self.write_bytes(RegAddressP1::TempTh, &encoded.to_be_bytes())
+    }
+
+    fn write_vcc_thresholds(&mut self, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let encoded: Signed16Thresholds = thresholds.quantize(SupplyVoltage::LSB_VOLTS as f64)?;
+        self.write_bytes(RegAddressP1::VccTh, &encoded.to_be_bytes())
+    }
+
+    fn write_slot_voltage_thresholds(&mut self, slot: Channel, thresholds: ThresholdPair<f32>) -> Result<(), Error<B>> {
+        let address = match slot {
+            Channel::One => RegAddressP1::Slot1Th,
+            Channel::Two => RegAddressP1::Slot2Th,
+        };
+        let encoded: Signed16Thresholds = thresholds.quantize(SlotValue::LSB_VOLTS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
+    fn write_slot_temperature_thresholds(
+        &mut self,
+        slot: Channel,
+        thresholds: ThresholdPair<f32>,
+    ) -> Result<(), Error<B>> {
+        let address = match slot {
+            Channel::One => RegAddressP1::Slot1Th,
+            Channel::Two => RegAddressP1::Slot2Th,
+        };
+        let encoded: Signed16Thresholds = thresholds.quantize(SlotValue::LSB_DEGREES_CELSIUS as f64)?;
+        self.write_bytes(address, &encoded.to_be_bytes())
+    }
+
     fn write_fast_aux_mux(&mut self, mux_n: u8, mux_p: u8) -> Result<(), Error<B>> {
         self.write_bytes(RegAddressP0::FaMuxN, &[mux_n, mux_p])
     }
@@ -1572,8 +2755,26 @@ where
         self.write_bytes(addr_n, &[negative as u8, positive as u8])
     }
 
-    fn write_gpio_ctrl(&mut self, gpio: u8) -> Result<(), Self::Error> {
-        self.write_bytes(RegAddressP0::FGpioCtrl, &[gpio])
+    fn write_gpio_ctrl(&mut self, gpio: GpioControlRegister) -> Result<(), Self::Error> {
+        self.write_bytes(RegAddressP0::FGpioCtrl, &gpio.into_bytes())
+    }
+
+    fn write_gpio5_config(&mut self, config: CurGpioControlRegister) -> Result<(), Self::Error> {
+        self.write_bytes(RegAddressP0::FCurGpioCtrl, &config.into_bytes())
+    }
+
+    fn write_gpio_controls(
+        &mut self,
+        gpio5_and_current: CurGpioControlRegister,
+        gpio1_to_4: GpioControlRegister,
+    ) -> Result<(), Self::Error> {
+        let bytes = [gpio5_and_current.into_bytes()[0], gpio1_to_4.into_bytes()[0]];
+        self.write_bytes(RegAddressP0::FCurGpioCtrl, &bytes)
+    }
+
+    fn write_gpio4_hb(&mut self, hb: bool) -> Result<(), Self::Error> {
+        let config = Gpio4HeartbeatControlRegister::new().with_gpio4_hb_enable(hb);
+        self.write_bytes(RegAddressP0::Gpio4HbCtrl, &config.into_bytes())
     }
 
     fn write_occ_config(&mut self, config1: OverCurrentConfig, config2: OverCurrentConfig) -> Result<(), Self::Error> {
@@ -1590,6 +2791,48 @@ where
         let mut buf = [0u8; 1];
         self.read_bytes(RegAddressP0::Status, &mut buf)?;
         Ok(StatusRegister::from_bytes(buf))
+    }
+
+    fn read_vt_alerts(&mut self) -> Result<VTAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatVT, &mut buf)?;
+        Ok(VTAlerts::from_bytes(buf))
+    }
+
+    fn read_ip_alerts(&mut self) -> Result<IPAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatIP, &mut buf)?;
+        Ok(IPAlerts::from_bytes(buf))
+    }
+
+    fn read_c_alerts(&mut self) -> Result<CAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatC, &mut buf)?;
+        Ok(CAlerts::from_bytes(buf))
+    }
+
+    fn read_e_alerts(&mut self) -> Result<EAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatE, &mut buf)?;
+        Ok(EAlerts::from_bytes(buf))
+    }
+
+    fn read_ceof_alerts(&mut self) -> Result<CEOFAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatCEOF, &mut buf)?;
+        Ok(CEOFAlerts::from_bytes(buf))
+    }
+
+    fn read_tb_alerts(&mut self) -> Result<TBAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatTB, &mut buf)?;
+        Ok(TBAlerts::from_bytes(buf))
+    }
+
+    fn read_vcc_alerts(&mut self) -> Result<VCCAlerts, Self::Error> {
+        let mut buf = [0u8; 1];
+        self.read_bytes(RegAddressP0::StatVCC, &mut buf)?;
+        Ok(VCCAlerts::from_bytes(buf))
     }
 
     fn read_faults(&mut self) -> Result<FaultsRegister, Error<B>> {
@@ -1741,6 +2984,25 @@ where
     B: SpiDevice<u8>,
     P: PollMethod<B>,
 {
+    fn encode_gain_factor(correction_factor: f32) -> Result<[u8; 3], Error<B>> {
+        if !correction_factor.is_finite() || correction_factor <= 0.0 {
+            return Err(Error::InvalidGainCorrection);
+        }
+        Ok(Float24::new(correction_factor).encode())
+    }
+
+    fn write_gain_factor(&mut self, address: RegAddressP1, correction_factor: f32) -> Result<(), Error<B>> {
+        let encoded = Self::encode_gain_factor(correction_factor)?;
+        self.write_bytes(address, &encoded)
+    }
+
+    fn divide_lsb_by_shunt(lsb: f64, shunt_ohms: f64) -> Result<f64, Error<B>> {
+        if !shunt_ohms.is_finite() || shunt_ohms <= 0.0 {
+            return Err(Error::InvalidThreshold);
+        }
+        Ok(lsb / shunt_ohms)
+    }
+
     /// Drains up to `N` I1 FIFO samples (3 bytes each: MSB, LSB, TAG). Stops at the first
     /// non-`Ok` sample, which is included as the terminator so the caller can read its `tag`.
     pub fn read_fifo_i1<const N: usize>(&mut self) -> Result<Vec<FifoSample, N>, Error<B>> {
@@ -1773,7 +3035,7 @@ where
             let batch = remaining.min(FIFO_SAMPLES_PER_BURST);
             let bytes = &mut buf[..batch * 3];
             self.read_bytes(reg, bytes)?;
-            for sample in bytes.chunks_exact(3) {
+            for sample in bytes.as_chunks::<3>().0 {
                 let raw = ((sample[0] as u16) << 8 | sample[1] as u16) as i16;
                 let tag = FifoTag::from_byte(sample[2]);
                 let stop = !matches!(tag, FifoTag::Ok);
@@ -1879,7 +3141,10 @@ where
     /// covered by a PEC.
     fn dcmd_write(&mut self, addr: u8, data: &[u8]) -> Result<(), Error<B>> {
         // Frame: 4 (header+PEC) + 1 (ID) + ≤16 (data) + 2 (PEC) = 23 bytes max.
-        debug_assert!(data.len() <= N_PER_PEC, "DCMD write exceeds one PEC group");
+        assert!(
+            (1..=N_PER_PEC).contains(&data.len()),
+            "DCMD write requires 1 to 16 data bytes"
+        );
 
         let mut frame = [0u8; 23];
         frame[0] = 0xFE;
@@ -1887,9 +3152,8 @@ where
         let header_pec = PEC15::calc(&frame[0..2]);
         frame[2] = header_pec[0];
         frame[3] = header_pec[1];
-        frame[4] = DcmdId::write(PECC).into();
-
         let n = data.len();
+        frame[4] = DcmdId::write((n - 1) as u8).into();
         frame[5..5 + n].copy_from_slice(data);
         let data_pec = PEC15::calc(&frame[5..5 + n]);
         frame[5 + n] = data_pec[0];
@@ -1906,7 +3170,10 @@ where
     /// Direct `DCMD` read: data appears on MISO after the 5-byte header, then the PEC.
     /// `buf` must fit one PEC group (≤ 16 bytes); the 16-byte accumulator row is the largest.
     fn dcmd_read(&mut self, addr: u8, buf: &mut [u8]) -> Result<(), Error<B>> {
-        debug_assert!(buf.len() <= N_PER_PEC, "DCMD read exceeds one PEC group");
+        assert!(
+            (1..=N_PER_PEC).contains(&buf.len()),
+            "DCMD read requires 1 to 16 data bytes"
+        );
 
         let n = buf.len();
         // MOSI: header (4) + ID (1) + n dummy data bytes + 2 dummy PEC bytes.
@@ -1919,7 +3186,7 @@ where
         let header_pec = PEC15::calc(&mosi[0..2]);
         mosi[2] = header_pec[0];
         mosi[3] = header_pec[1];
-        mosi[4] = DcmdId::read(PECC).into();
+        mosi[4] = DcmdId::read((n - 1) as u8).into();
         // bytes 5..5+n and the trailing PEC bytes stay 0xFF (don't-care on MOSI).
 
         let total = 5 + n + 2;

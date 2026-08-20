@@ -8,15 +8,19 @@
 //!
 //! Framing checked here:
 //! * **DCMD writes** — `[0xFE, RADDR, PEC0, PEC1, ID, D0..Dn-1, DPEC0, DPEC1]` with
-//!   `ID = 0x5B` for PECC=15 (write).
-//! * **DCMD reads** — `[0xFE, RADDR, PEC0, PEC1, ID=0x9B, <dummy>]` on MOSI, with the
+//!   the ID's PECC field set to `n - 1`.
+//! * **DCMD reads** — `[0xFE, RADDR, PEC0, PEC1, ID, <dummy>]` on MOSI, with PECC set
+//!   to `n - 1` and the
 //!   slave's `[D0..Dn-1, DPEC0, DPEC1]` appearing on MISO after the 5-byte header.
 //! * **Broadcast 16-bit commands** — `[CMD0, CMD1, PEC0, PEC1]` (e.g. ADCV = 0x0260).
 
 use crate::client::{
-    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AdcConfiguration, Channel, Client, DcmdId,
-    Error as ClientError, FastControlRegister, FifoTag, MuxInput, NtcConfig, OpsControlRegister, OverCurrentConfig,
-    ShuntTcConfig, SlotValue, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
+    AccumulatedCharge, AccumulatedEnergy, AccumulatedTime, AccumulatorClock, AdcConfiguration, BatteryVoltage, Channel,
+    ChargeAccumulator, Client, CurGpioControlRegister, CurrentSenseVoltage, DcmdId, DieTemperature, EnergyAccumulator,
+    Error as ClientError, FastControlRegister, FifoTag, GpioControlRegister, GpioCtrl, MuxGainSlot, MuxInput,
+    NtcConfig, OpsControlRegister, OverCurrentConfig, PositiveRatio, PowerOrVoltage, Quantize, ShuntGainCorrection,
+    ShuntTcConfig, Signed16Thresholds, SlotValue, SupplyVoltage, Threshold, ThresholdConversionError, ThresholdPair,
+    TimeBase, LTC2949, T_BOOT_US, T_MLCK_US, T_READY_US,
 };
 use crate::float24::Float24;
 use crate::mocks::{BusError, MockSPIDevice};
@@ -24,13 +28,6 @@ use crate::pec15::PEC15;
 use alloc::vec;
 use alloc::vec::Vec;
 use embedded_hal::spi::Operation;
-
-/// ID byte for DCMD writes with PECC=15 (16 data bytes per PEC group). Datasheet
-/// Table 12 — bit 7 RW=0, bit 6 !RW=1, PECC=0b1111 → 0b0101_1011.
-const DCMD_ID_WRITE: u8 = 0x5B;
-
-/// ID byte for DCMD reads with PECC=15 — bit 7 RW=1, bit 6 !RW=0 → 0b1001_1011.
-const DCMD_ID_READ: u8 = 0x9B;
 
 /// REGSCTRL bytes written by `select_page` in the parallel topology. RDCVCONF=1
 /// (bit 7), BCREN=0, PAGE selects the page (bit 0):
@@ -70,13 +67,14 @@ fn assert_f64_approx_eq(actual: f64, expected: f64) {
 /// Constructs the exact byte sequence the driver should produce for a DCMD write of
 /// `data` to register `addr`.
 fn dcmd_write_bytes(addr: u8, data: &[u8]) -> Vec<u8> {
+    assert!((1..=16).contains(&data.len()));
     let mut v = Vec::with_capacity(7 + data.len());
     v.push(0xFE);
     v.push(addr);
     let header_pec = PEC15::calc(&[0xFE, addr]);
     v.push(header_pec[0]);
     v.push(header_pec[1]);
-    v.push(DCMD_ID_WRITE);
+    v.push(make_id(false, (data.len() - 1) as u8));
     v.extend_from_slice(data);
     let data_pec = PEC15::calc(data);
     v.push(data_pec[0]);
@@ -100,6 +98,7 @@ fn f24_high(value: f32) -> [u8; 2] {
 /// * MISO: `[_, _, _, _, _, D0…D(n-1), dpec0, dpec1]` — first five bytes are ignored by
 ///   the driver (the command echo region); the data and its PEC follow.
 fn dcmd_read_frames(addr: u8, data: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    assert!((1..=16).contains(&data.len()));
     let n = data.len();
     let total = 5 + n + 2;
 
@@ -109,7 +108,7 @@ fn dcmd_read_frames(addr: u8, data: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let hpec = PEC15::calc(&[0xFE, addr]);
     tx[2] = hpec[0];
     tx[3] = hpec[1];
-    tx[4] = DCMD_ID_READ;
+    tx[4] = make_id(true, (n - 1) as u8);
 
     let mut rx = vec![0u8; total];
     rx[5..5 + n].copy_from_slice(data);
@@ -181,8 +180,7 @@ fn expect_select_page(mock: &mut MockSPIDevice, page1: bool) {
 }
 
 /// Computes a DCMD ID byte from the read/write flag and the PECC field, mirroring
-/// the formula in [`crate::client`]. Used here only as a self-contained witness
-/// that our `DCMD_ID_WRITE` constant matches the datasheet encoding.
+/// the formula in [`crate::client`].
 fn make_id(read: bool, pecc: u8) -> u8 {
     let pecc = pecc & 0x0F;
     let p3 = (pecc >> 3) & 1;
@@ -202,11 +200,10 @@ fn id_byte_read_pecc15_is_0x9b() {
     assert_eq!(0x9B, make_id(true, 15));
 }
 
-/// Write with PECC=15 (the value the driver uses) should yield 0x5B, matching
-/// `DCMD_ID_WRITE`.
+/// Write with PECC=15 should yield 0x5B.
 #[test]
-fn id_byte_write_pecc15_matches_driver_constant() {
-    assert_eq!(DCMD_ID_WRITE, make_id(false, 15));
+fn id_byte_write_pecc15_is_0x5b() {
+    assert_eq!(0x5B, make_id(false, 15));
 }
 
 /// Write with PECC=1 (2 data bytes per PEC) should yield 0x45 — matches the
@@ -455,14 +452,120 @@ fn write_fast_aux_mux_propagates_bus_error() {
 
 #[test]
 fn write_gpio_ctrl_emits_dcmd_to_fgpioctrl() {
-    // FGPIOCTRL has four 2-bit GPIO control fields. 0x03 sets GPIO1CTRL=0b11
-    // (drive GPIO1 high) and leaves GPIO2..GPIO4 at 0b00 (tristate).
+    // 0b00_10_01_11 maps GPIO1..GPIO4 from the least-significant field upward.
+    let config = GpioControlRegister::new()
+        .with_gpio1_ctrl(GpioCtrl::High)
+        .with_gpio2_ctrl(GpioCtrl::Low)
+        .with_gpio3_ctrl(GpioCtrl::Toggle400kHz)
+        .with_gpio4_ctrl(GpioCtrl::Tristate);
+    assert_eq!([0b00_10_01_11], config.into_bytes());
+
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
-    expect_write(&mut mock, dcmd_write_bytes(0xF2, &[0x03]));
+    expect_write(&mut mock, dcmd_write_bytes(0xF2, &[0b00_10_01_11]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
-    client.write_gpio_ctrl(0x03).unwrap();
+    client.write_gpio_ctrl(config).unwrap();
+}
+
+#[test]
+fn write_gpio5_config_emits_dcmd_to_fcurgpioctrl() {
+    let config = CurGpioControlRegister::new()
+        .with_gpio5_ctrl(GpioCtrl::Toggle400kHz)
+        .with_mux_p_cur_pol(true)
+        .with_mux_p_cur_en(false)
+        .with_mux_n_cur_pol(false)
+        .with_mux_n_cur_en(true);
+    // GPIO5CTRL=10, reserved=00, MUXPCURPOL=1, MUXPCUREN=0,
+    // MUXNCURPOL=0, MUXNCUREN=1.
+    assert_eq!([0b10_01_00_10], config.into_bytes());
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF1, &[0b10_01_00_10]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio5_config(config).unwrap();
+}
+
+#[test]
+fn write_gpio5_config_propagates_bus_error() {
+    let config = CurGpioControlRegister::new().with_gpio5_ctrl(GpioCtrl::High);
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    let expected = dcmd_write_bytes(0xF1, &[0x03]);
+    mock.expect_transaction().times(1).returning(move |ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(expected.as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_gpio5_config(config),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
+}
+
+#[test]
+fn write_gpio_controls_encodes_gpio5_and_current_sources_in_one_burst() {
+    let gpio5_and_current = CurGpioControlRegister::new()
+        .with_gpio5_ctrl(GpioCtrl::Toggle400kHz)
+        .with_mux_p_cur_pol(true)
+        .with_mux_p_cur_en(true)
+        .with_mux_n_cur_pol(false)
+        .with_mux_n_cur_en(true);
+    // GPIO5CTRL=10, reserved=00, MUXPCURPOL=1, MUXPCUREN=1,
+    // MUXNCURPOL=0, MUXNCUREN=1.
+    assert_eq!([0b10_11_00_10], gpio5_and_current.into_bytes());
+
+    let gpio1_to_4 = GpioControlRegister::new()
+        .with_gpio1_ctrl(GpioCtrl::Low)
+        .with_gpio2_ctrl(GpioCtrl::High)
+        .with_gpio3_ctrl(GpioCtrl::Tristate)
+        .with_gpio4_ctrl(GpioCtrl::Toggle400kHz);
+    assert_eq!([0b10_00_11_01], gpio1_to_4.into_bytes());
+
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xF1, &[0b10_11_00_10, 0b10_00_11_01]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio_controls(gpio5_and_current, gpio1_to_4).unwrap();
+}
+
+#[test]
+fn write_gpio4_hb_success() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_write(&mut mock, dcmd_write_bytes(0xE8, &[0x01]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client.write_gpio4_hb(true).unwrap();
+}
+
+#[test]
+fn write_gpio4_hb_propagates_bus_error() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    let expected = dcmd_write_bytes(0xE8, &[0x01]);
+    mock.expect_transaction().times(1).returning(move |ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(expected.as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_gpio4_hb(true),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
 }
 
 #[test]
@@ -509,6 +612,322 @@ fn write_adcconf_uses_page1_and_writes_to_0xdf() {
 }
 
 #[test]
+fn write_non_accumulated_thresholds_convert_si_units_and_target_table67_addresses() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x80, &[0x00, 0x14, 0xFF, 0xF6]));
+    expect_write(&mut mock, dcmd_write_bytes(0x8C, &[0x00, 0x28, 0xFF, 0xE2]));
+    expect_write(&mut mock, dcmd_write_bytes(0x84, &[0x00, 0x3C, 0xFF, 0xCE]));
+    expect_write(&mut mock, dcmd_write_bytes(0x90, &[0x00, 0x50, 0xFF, 0xBA]));
+    expect_write(&mut mock, dcmd_write_bytes(0x94, &[0x05, 0xDC, 0x00, 0x00]));
+    expect_write(&mut mock, dcmd_write_bytes(0x98, &[0x00, 0xC8, 0x00, 0x64]));
+    expect_write(&mut mock, dcmd_write_bytes(0xA0, &[0x00, 0x64, 0xFF, 0xA6]));
+    expect_write(&mut mock, dcmd_write_bytes(0xA4, &[0x00, 0x78, 0xFF, 0x92]));
+
+    let shunt = 1e-3_f32;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_current_thresholds(
+            Channel::One,
+            ThresholdPair::new(
+                -10.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+                20.0 * CurrentSenseVoltage::THRESHOLD_LSB_VOLTS / shunt,
+            ),
+            shunt,
+        )
+        .unwrap();
+    client
+        .write_power_thresholds(
+            Channel::Two,
+            ThresholdPair::new(
+                -30.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+                40.0 * PowerOrVoltage::POWER_THRESHOLD_LSB_VOLT_SQUARED / shunt,
+            ),
+            shunt,
+        )
+        .unwrap();
+    client
+        .write_power_as_voltage_thresholds(
+            Channel::One,
+            ThresholdPair::new(
+                -50.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+                60.0 * PowerOrVoltage::VOLTAGE_THRESHOLD_LSB_VOLTS,
+            ),
+        )
+        .unwrap();
+    client
+        .write_battery_thresholds(ThresholdPair::new(
+            -70.0 * BatteryVoltage::LSB_VOLTS,
+            80.0 * BatteryVoltage::LSB_VOLTS,
+        ))
+        .unwrap();
+    client
+        .write_temperature_thresholds(ThresholdPair::new(
+            -DieTemperature::ZERO_CELSIUS_KELVIN,
+            1500.0 * DieTemperature::LSB_KELVIN - DieTemperature::ZERO_CELSIUS_KELVIN,
+        ))
+        .unwrap();
+    client
+        .write_vcc_thresholds(ThresholdPair::new(
+            100.0 * SupplyVoltage::LSB_VOLTS,
+            200.0 * SupplyVoltage::LSB_VOLTS,
+        ))
+        .unwrap();
+    client
+        .write_slot_voltage_thresholds(
+            Channel::One,
+            ThresholdPair::new(-90.0 * SlotValue::LSB_VOLTS, 100.0 * SlotValue::LSB_VOLTS),
+        )
+        .unwrap();
+    client
+        .write_slot_temperature_thresholds(
+            Channel::Two,
+            ThresholdPair::new(
+                -110.0 * SlotValue::LSB_DEGREES_CELSIUS,
+                120.0 * SlotValue::LSB_DEGREES_CELSIUS,
+            ),
+        )
+        .unwrap();
+}
+
+#[test]
+fn half_amp_current_threshold_uses_3_8uv_lsb() {
+    // 0.5 A through 100 µΩ produces 50 µV. I1TH is a 16-bit threshold containing the
+    // upper 16 bits of the effective 18-bit current result, so one code is 3.8 µV:
+    // round(50 / 3.8) = 13. Using the 950 nV result LSB here would produce code 53 and
+    // make the hardware trigger at approximately 2 A.
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x80, &[0x00, 0x0D, 0x00, 0x00]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_current_thresholds(Channel::One, ThresholdPair::new(0.0, 0.5), 100e-6)
+        .unwrap();
+}
+
+#[test]
+fn write_accumulator_thresholds_cover_all_table67_accumulators() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x00, &[0, 0, 0, 0, 0, 3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]),
+    );
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x20, &[0, 0, 0, 0, 0, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC]),
+    );
+    expect_write(&mut mock, dcmd_write_bytes(0x44, &7_i64.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x54, &(-6_i64).to_be_bytes()));
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x10, &[0, 0, 0, 0, 0, 9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF8]),
+    );
+    expect_write(
+        &mut mock,
+        dcmd_write_bytes(0x30, &[0, 0, 0, 0, 0, 11, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF6]),
+    );
+    expect_write(&mut mock, dcmd_write_bytes(0x64, &13_i64.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x74, &(-12_i64).to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x0C, &14_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x2C, &15_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x4C, &16_u32.to_be_bytes()));
+    expect_write(&mut mock, dcmd_write_bytes(0x6C, &17_u32.to_be_bytes()));
+
+    let shunt = 1e-3_f64;
+    let charge_lsb = AccumulatedCharge::LSB_VOLT_SECONDS / shunt;
+    let energy_lsb = AccumulatedEnergy::LSB_VOLT_SQUARED_SECONDS / shunt;
+    let time_lsb = AccumulatedTime::LSB_SECONDS;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+
+    for (accumulator, low, high) in [
+        (ChargeAccumulator::Charge1, -2.0, 3.0),
+        (ChargeAccumulator::Charge2, -4.0, 5.0),
+        (ChargeAccumulator::Charge3, -6.0, 7.0),
+    ] {
+        client
+            .write_charge_thresholds(
+                accumulator,
+                ThresholdPair::new(low * charge_lsb, high * charge_lsb),
+                shunt,
+                AccumulatorClock::Internal,
+            )
+            .unwrap();
+    }
+    for (accumulator, low, high) in [
+        (EnergyAccumulator::Energy1, -8.0, 9.0),
+        (EnergyAccumulator::Energy2, -10.0, 11.0),
+        (EnergyAccumulator::Energy4, -12.0, 13.0),
+    ] {
+        client
+            .write_energy_thresholds(
+                accumulator,
+                ThresholdPair::new(low * energy_lsb, high * energy_lsb),
+                shunt,
+                AccumulatorClock::Internal,
+            )
+            .unwrap();
+    }
+    for (time_base, raw) in [
+        (TimeBase::Time1, 14.0),
+        (TimeBase::Time2, 15.0),
+        (TimeBase::Time3, 16.0),
+        (TimeBase::Time4, 17.0),
+    ] {
+        client
+            .write_time_threshold(time_base, Threshold::new(raw * time_lsb), AccumulatorClock::Internal)
+            .unwrap();
+    }
+}
+
+#[test]
+fn external_clock_threshold_scaling_uses_table27_formula() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0x0C, &10_u32.to_be_bytes()));
+
+    let clock = AccumulatorClock::External {
+        frequency_hz: 10e6,
+        pre: 4,
+        div: 19,
+    };
+    let time_lsb = 12.8315 / 10e6 * 16.0 * 20.0;
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_time_threshold(TimeBase::Time1, Threshold::new(10.0 * time_lsb), clock)
+        .unwrap();
+}
+
+#[test]
+fn invalid_threshold_is_rejected_before_bus_access() {
+    let mock = MockSPIDevice::new();
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_battery_thresholds(ThresholdPair::new(2.0, 1.0)),
+        Err(ClientError::InvalidThreshold)
+    ));
+    assert!(matches!(
+        client.write_current_thresholds(Channel::One, ThresholdPair::new(-1.0, 1.0), 0.0),
+        Err(ClientError::InvalidThreshold)
+    ));
+    assert!(matches!(
+        client.write_time_threshold(TimeBase::Time1, Threshold::new(f64::NAN), AccumulatorClock::Internal),
+        Err(ClientError::InvalidThreshold)
+    ));
+}
+
+#[test]
+fn threshold_pair_quantization_reports_conversion_errors() {
+    let encoded: Signed16Thresholds = ThresholdPair::new(-1.5_f64, 2.5).quantize(1.0).unwrap();
+    assert_eq!(-2, encoded.low());
+    assert_eq!(3, encoded.high());
+    assert_eq!([0x00, 0x03, 0xFF, 0xFE], encoded.to_be_bytes());
+
+    assert_eq!(
+        Err(ThresholdConversionError::LowAboveHigh),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(2.0_f64, 1.0), 1.0)
+    );
+    assert_eq!(
+        Err(ThresholdConversionError::InvalidScale),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(0.0_f64, 1.0), 0.0)
+    );
+    assert_eq!(
+        Err(ThresholdConversionError::OutOfRange),
+        Quantize::<Signed16Thresholds>::quantize(ThresholdPair::new(0.0_f64, 40_000.0), 1.0)
+    );
+}
+
+#[test]
+fn write_gain_corrections_match_table72_addresses_and_examples() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0xB0, &[0x3E, 0xF5, 0xF5])); // 100/102
+    expect_write(&mut mock, dcmd_write_bytes(0xB3, &[0x3F, 0x06, 0x24])); // 1.024
+    expect_write(&mut mock, dcmd_write_bytes(0xB6, &[0x38, 0x47, 0xAE])); // 0.01
+    expect_write(&mut mock, dcmd_write_bytes(0xB9, &[0x3E, 0xE6, 0x66])); // 0.95
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    let calibrated_shunt = ShuntGainCorrection::from_resistances(100e-6, 102e-6);
+    assert_f32_approx_eq(calibrated_shunt.correction_factor(), 100.0 / 102.0);
+    client.write_shunt_gain_correction(Channel::One, calibrated_shunt).unwrap();
+    client
+        .write_shunt_gain_correction(Channel::Two, ShuntGainCorrection::from_correction_factor(1.024))
+        .unwrap();
+    client.write_shunt_ratio(100e-6, 10e-3).unwrap();
+    client.write_battery_gain_correction(0.95).unwrap();
+}
+
+#[test]
+fn positive_ratio_validates_and_stores_the_ratio() {
+    let ratio = PositiveRatio::try_from_parts(100e-6, 10e-3).unwrap();
+    assert_f32_approx_eq(ratio.value(), 100e-6 / 10e-3);
+    assert_eq!(
+        Err(crate::client::PositiveRatioError::NonPositiveOrNonFinite),
+        PositiveRatio::try_from_ratio(0.0)
+    );
+    assert_eq!(
+        Err(crate::client::PositiveRatioError::NonPositiveOrNonFinite),
+        PositiveRatio::try_from_parts(-1.0, 2.0)
+    );
+}
+
+#[test]
+fn write_mux_gain_corrections_write_float24_factor_and_input_pair() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, true);
+    expect_write(&mut mock, dcmd_write_bytes(0xC0, &[0x3E, 0xCC, 0xCC]));
+    expect_write(&mut mock, dcmd_write_bytes(0xBC, &[0x02, 0x01]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC3, &f24(1.0)));
+    expect_write(&mut mock, dcmd_write_bytes(0xBE, &[0x0F, 0x10]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC6, &f24(1.01)));
+    expect_write(&mut mock, dcmd_write_bytes(0xCC, &[0x11, 0x12]));
+    expect_write(&mut mock, dcmd_write_bytes(0xC9, &f24(0.99)));
+    expect_write(&mut mock, dcmd_write_bytes(0xCE, &[0x13, 0x14]));
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    client
+        .write_mux_gain_correction(MuxGainSlot::One, 0.9, MuxInput::V2, MuxInput::V1)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Two, 1.0, MuxInput::VbatM, MuxInput::VbatP)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Three, 1.01, MuxInput::Cf2M, MuxInput::Cf2P)
+        .unwrap();
+    client
+        .write_mux_gain_correction(MuxGainSlot::Four, 0.99, MuxInput::Cf1M, MuxInput::Cf1P)
+        .unwrap();
+}
+
+#[test]
+fn invalid_gain_correction_is_rejected_before_bus_access() {
+    let mock = MockSPIDevice::new();
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_correction_factor(f32::NAN)),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_resistances(100e-6, 0.0)),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    // Validate the source resistances individually, rather than accepting their positive ratio.
+    assert!(matches!(
+        client.write_shunt_gain_correction(Channel::One, ShuntGainCorrection::from_resistances(-100e-6, -102e-6)),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_shunt_ratio(-100e-6, 10e-3),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+    assert!(matches!(
+        client.write_mux_gain_correction(MuxGainSlot::One, 0.0, MuxInput::V2, MuxInput::V1),
+        Err(ClientError::InvalidGainCorrection)
+    ));
+}
+
+#[test]
 fn write_opctrl_then_write_factrl_only_selects_page_once() {
     // After the first call has selected PAGE0, the second call must skip the
     // REGSCTRL write thanks to the `current_page` cache.
@@ -525,8 +944,8 @@ fn write_opctrl_then_write_factrl_only_selects_page_once() {
 #[test]
 fn read_uses_dcmd_read_frame_with_read_id() {
     // Verify the exact MOSI frame of a direct DCMD read: command header + read ID
-    // (0x9B) + don't-care padding. This is the defining behaviour of the parallel
-    // topology (vs. the broadcast-RDCV path used when on top of a chain).
+    // (0x80 for one data byte) + don't-care padding. This is the defining behaviour
+    // of the parallel topology (vs. the broadcast-RDCV path used when on top of a chain).
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
 
@@ -534,7 +953,7 @@ fn read_uses_dcmd_read_frame_with_read_id() {
     let (tx, rx) = dcmd_read_frames(0x80, &[0xA5]);
     assert_eq!(0xFE, tx[0]);
     assert_eq!(0x80, tx[1]);
-    assert_eq!(DCMD_ID_READ, tx[4]); // read ID, not write
+    assert_eq!(0x80, tx[4]); // read ID with PECC=0 (one data byte)
     expect_transfer(&mut mock, tx, rx);
 
     let mut client = LTC2949::new(mock);
@@ -576,6 +995,44 @@ fn read_status_decodes_bitfield() {
     assert!(status.update());
     assert!(status.adcerr());
     assert!(status.tberr());
+}
+
+#[test]
+fn read_alert_registers_use_correct_addresses_and_decode_bitfields() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    expect_dcmd_read(&mut mock, 0x81, &[0xA5]); // STATVT
+    expect_dcmd_read(&mut mock, 0x82, &[0x5A]); // STATIP
+    expect_dcmd_read(&mut mock, 0x83, &[0x2D]); // STATC
+    expect_dcmd_read(&mut mock, 0x85, &[0xB5]); // STATCEOF
+    expect_dcmd_read(&mut mock, 0x86, &[0xC3]); // STATTB
+    expect_dcmd_read(&mut mock, 0x87, &[0x0A]); // STATVCC
+
+    let mut client = LTC2949::new(mock);
+
+    let vt = client.read_vt_alerts().unwrap();
+    assert!(vt.bath() && vt.temph() && vt.slot1l() && vt.slot2l());
+    assert!(!vt.batl() && !vt.templ() && !vt.slot1h() && !vt.slot2h());
+
+    let ip = client.read_ip_alerts().unwrap();
+    assert!(ip.i1l() && ip.p1l() && ip.i2h() && ip.p2h());
+    assert!(!ip.i1h() && !ip.p1h() && !ip.i2l() && !ip.p2l());
+
+    let charge = client.read_c_alerts().unwrap();
+    assert!(charge.c1h() && charge.c2h() && charge.c2l() && charge.c3l());
+    assert!(!charge.c1l() && !charge.c3h());
+
+    let ceof = client.read_ceof_alerts().unwrap();
+    assert!(ceof.c1ovf() && ceof.c3ovf() && ceof.e1ovf() && ceof.e2ovf() && ceof.e4ovf());
+    assert!(!ceof.c2ovf());
+
+    let tb = client.read_tb_alerts().unwrap();
+    assert!(tb.t1th() && tb.t2th() && tb.t3ovf() && tb.t4ovf());
+    assert!(!tb.t3th() && !tb.t4th() && !tb.t1ovf() && !tb.t2ovf());
+
+    let vcc = client.read_vcc_alerts().unwrap();
+    assert!(vcc.vccl() && vcc.occ2h());
+    assert!(!vcc.vcch() && !vcc.occ1h());
 }
 
 #[test]

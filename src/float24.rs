@@ -1,16 +1,16 @@
 //! # LTC2949 Float24 encoding
 //!
-//! The LTC2949 stores NTC and sense-resistor temperature-compensation parameters in a
-//! device-specific 24-bit floating-point format. [`Float24`] converts an `f32` into the
-//! MSB-first bytes expected by those registers. The format consists of one sign bit, a 7-bit
-//! exponent biased by 63, and a 16-bit mantissa; conversion truncates the lower `f32`
-//! mantissa bits.
+//! The LTC2949 stores NTC parameters, temperature-compensation parameters, and gain
+//! correction factors in a device-specific 24-bit floating-point format. [`Float24`]
+//! converts an `f32` into the MSB-first bytes expected by those registers. The format
+//! consists of one sign bit, a 7-bit exponent biased by 63, and a 16-bit mantissa;
+//! conversion truncates the lower `f32` mantissa bits.
 //!
 //! ## Full three-byte values
 //!
-//! [`Float24::encode`] is used for reference resistors, Steinhart–Hart coefficients, and
-//! sense-resistor temperature coefficients. These examples are values from a realistic
-//! 10 kΩ NTC configuration.
+//! [`Float24::encode`] is used for gain factors, reference resistors, Steinhart–Hart
+//! coefficients, and sense-resistor temperature coefficients. These examples are values
+//! from a realistic 10 kΩ NTC configuration.
 //!
 //! ```
 //! # use ltc2949::float24::Float24;
