@@ -496,13 +496,34 @@ fn write_gpio_controls_encodes_gpio5_and_current_sources_in_one_burst() {
 }
 
 #[test]
-fn write_gpio4_hb() {
+fn write_gpio4_hb_success() {
     let mut mock = MockSPIDevice::new();
     expect_select_page(&mut mock, false);
     expect_write(&mut mock, dcmd_write_bytes(0xE8, &[0x01]));
 
     let mut client: LTC2949<_, _> = LTC2949::new(mock);
     client.write_gpio4_hb(true).unwrap();
+}
+
+#[test]
+fn write_gpio4_hb_propagates_bus_error() {
+    let mut mock = MockSPIDevice::new();
+    expect_select_page(&mut mock, false);
+    let expected = dcmd_write_bytes(0xE8, &[0x01]);
+    mock.expect_transaction().times(1).returning(move |ops| {
+        assert_eq!(1, ops.len());
+        match &ops[0] {
+            Operation::Write(bytes) => assert_eq!(expected.as_slice(), *bytes),
+            other => panic!("expected Operation::Write, got {:?}", other),
+        }
+        Err(BusError::Error1)
+    });
+
+    let mut client: LTC2949<_, _> = LTC2949::new(mock);
+    assert!(matches!(
+        client.write_gpio4_hb(true),
+        Err(ClientError::BusError(BusError::Error1))
+    ));
 }
 
 #[test]
