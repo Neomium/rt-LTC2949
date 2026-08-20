@@ -1985,31 +1985,24 @@ pub enum MuxGainSlot {
 /// Input validation happens in [`Client::write_shunt_gain_correction`], allowing both
 /// constructors to remain infallible and convenient in configuration structures.
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct ShuntGainCorrection {
-    source: ShuntGainCorrectionSource,
-}
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-enum ShuntGainCorrectionSource {
+pub enum ShuntGainCorrection {
+    /// An already calculated, dimensionless correction factor.
     CorrectionFactor(f32),
+    /// The nominal and measured shunt resistances used to calculate the correction factor.
     Resistances { nominal_ohms: f32, actual_ohms: f32 },
 }
 
 impl ShuntGainCorrection {
     /// Uses an already calculated, dimensionless correction factor.
     pub const fn from_correction_factor(correction_factor: f32) -> Self {
-        Self {
-            source: ShuntGainCorrectionSource::CorrectionFactor(correction_factor),
-        }
+        Self::CorrectionFactor(correction_factor)
     }
 
     /// Calculates the correction factor from the nominal and measured shunt resistances.
     pub const fn from_resistances(nominal_ohms: f32, actual_ohms: f32) -> Self {
-        Self {
-            source: ShuntGainCorrectionSource::Resistances {
-                nominal_ohms,
-                actual_ohms,
-            },
+        Self::Resistances {
+            nominal_ohms,
+            actual_ohms,
         }
     }
 
@@ -2018,9 +2011,9 @@ impl ShuntGainCorrection {
     /// This is the supplied factor or `nominal_ohms / actual_ohms`. The write method rejects
     /// non-positive or non-finite inputs before accessing the bus.
     pub fn correction_factor(self) -> f32 {
-        match self.source {
-            ShuntGainCorrectionSource::CorrectionFactor(correction_factor) => correction_factor,
-            ShuntGainCorrectionSource::Resistances {
+        match self {
+            Self::CorrectionFactor(correction_factor) => correction_factor,
+            Self::Resistances {
                 nominal_ohms,
                 actual_ohms,
             } => nominal_ohms / actual_ohms,
@@ -2504,15 +2497,17 @@ where
             Channel::One => RegAddressP1::Rs1Gc,
             Channel::Two => RegAddressP1::Rs2Gc,
         };
-        let correction_factor = match correction.source {
-            ShuntGainCorrectionSource::CorrectionFactor(correction_factor) => correction_factor,
-            ShuntGainCorrectionSource::Resistances {
+
+        let correction_factor = match correction {
+            ShuntGainCorrection::CorrectionFactor(correction_factor) => correction_factor,
+            ShuntGainCorrection::Resistances {
                 nominal_ohms,
                 actual_ohms,
             } => PositiveRatio::try_from_parts(nominal_ohms, actual_ohms)
                 .map_err(|_| Error::InvalidGainCorrection)?
                 .value(),
         };
+
         self.write_gain_factor(address, correction_factor)
     }
 
@@ -3035,7 +3030,7 @@ where
             let batch = remaining.min(FIFO_SAMPLES_PER_BURST);
             let bytes = &mut buf[..batch * 3];
             self.read_bytes(reg, bytes)?;
-            for sample in bytes.chunks_exact(3) {
+            for sample in bytes.as_chunks::<3>().0 {
                 let raw = ((sample[0] as u16) << 8 | sample[1] as u16) as i16;
                 let tag = FifoTag::from_byte(sample[2]);
                 let stop = !matches!(tag, FifoTag::Ok);
